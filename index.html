@@ -443,7 +443,7 @@
 
         <section class="panel" aria-label="Pending bids">
           <h2>Pending Bids</h2>
-          <p class="sec-sub">Open High / Low bids placed in the Trade &amp; Save app, waiting on a result. Settlement is by direction, not per person: Reward HIGH and every pending High bid wins — double the stake credited to that user's Main Balance (stake back plus a 100% payout) — while every pending Low bid loses its stake, which was already locked when the bid was placed. Reward LOW does the reverse. All amounts are virtual.</p>
+          <p class="sec-sub">Open High / Low bids placed in the Trade &amp; Save app, waiting on a result. Settlement is by direction, not per person: Reward HIGH and every pending High bid wins — stake × 1.9 credited to that user's Main Balance (stake back plus a 90% payout) — while every pending Low bid loses its stake, which was already locked when the bid was placed. Reward LOW does the reverse. All amounts are virtual.</p>
           <div id="bidList"></div>
         </section>
 
@@ -502,7 +502,7 @@
          ================================================================== */
       var ADMIN_PIN = "1234";
       var REFERRAL_REWARD = 3;      // USDT credited to the referrer
-      var BID_PAYOUT_RATE = 1.0;    // a winning bid pays double: 100% profit on a won bid
+      var BID_PAYOUT_RATE = 0.9;    // a winning bid credits stake × 1.9: 90% profit on a won bid
 
       var SUPABASE_URL = "https://zvubytosshkxpbpvgcsw.supabase.co";
       var SUPABASE_ANON_KEY = "sb_publishable_c1sl1Mw4Y5EMWjkmYSzEow_m5Yowqk0";
@@ -715,8 +715,8 @@
       // Settlement is direction-based, never per person: rewarding a side
       // settles EVERY currently pending bid in one pass. Bids on the
       // rewarded side are marked won — the user's Main Balance is credited
-      // stake × 2.0 (stake back plus the 100% payout) and the bid records
-      // payout = the full stake (stake × 1.0). Bids on the other side are marked lost with
+      // stake × 1.9 (stake back plus the 90% payout) and the bid records
+      // payout = 90% of the stake (stake × 0.9). Bids on the other side are marked lost with
       // nothing further taken — the stake was already locked when the bid
       // was placed. Same tn_bids status/payout/decided_at fields and the
       // same wallet updates as the old per-bid flow, so the user app picks
@@ -972,7 +972,7 @@
             '<div class="confirm-q">Reward ' + (side === "high" ? "HIGH" : "LOW") + "? " +
               bidWord(winSide.n) + " win · " + bidWord(loseSide.n) + " lose</div>" +
             '<div class="confirm-sub">Winners are credited ' + fmtUSD(creditTotal) +
-              " in total (stake back plus 100% payout — double the stake). Losers forfeit their locked stake. This settles every pending bid at once.</div>" +
+              " in total (stake back plus 90% payout — stake × 1.9). Losers forfeit their locked stake. This settles every pending bid at once.</div>" +
             '<div class="req-btns">' +
               '<button class="' + (side === "high" ? "btn-confirm-high" : "btn-confirm-low") + '" type="button" data-confirm-settle="1">Confirm — settle all</button>' +
               '<button class="btn-cancel" type="button" data-cancel-settle="1">Cancel</button>' +
