@@ -309,11 +309,18 @@
       }
       .danger h2{ font-size:13px; letter-spacing:1.4px; text-transform:uppercase; color:var(--red); margin:0 0 4px; font-weight:800; }
       .danger p{ color:var(--muted); font-size:13px; margin:0 0 12px; }
+      .danger-btns{ display:flex; gap:10px; flex-wrap:wrap; }
+      .danger-btns button{ flex:1 1 150px; }
       .btn-reset{
         width:100%; height:46px; border-radius:12px; border:1.5px solid var(--red);
         background:transparent; color:var(--red); font-weight:800; font-size:14.5px;
       }
       .btn-reset.confirm{ background:var(--red); color:#2A0D12; }
+      .btn-clear{
+        width:100%; height:46px; border-radius:12px; border:1.5px solid var(--gold);
+        background:transparent; color:var(--gold-ink); font-weight:800; font-size:14.5px;
+      }
+      .btn-clear.confirm{ background:var(--gold); color:#0B1132; }
       .foot-note{ text-align:center; color:var(--muted-2); font-size:12px; margin-top:20px; }
 
       /* ---------- Toasts ---------- */
@@ -467,8 +474,11 @@
 
         <section class="danger" aria-label="Reset demo">
           <h2>Reset Demo</h2>
-          <p>Clears all shared demo data — registered accounts, balances, requests, referrals, and trade history — for both this panel and the Trade &amp; Save app on this device.</p>
-          <button class="btn-reset" type="button" id="resetBtn">Reset demo data</button>
+          <p>Clear history removes only processed deposit/withdrawal requests and settled bids — accounts, balances, and pending items stay untouched. Reset clears all shared demo data — registered accounts, balances, requests, referrals, and trade history — for both this panel and the Trade &amp; Save app on this device.</p>
+          <div class="danger-btns">
+            <button class="btn-clear" type="button" id="clearHistoryBtn">Clear history</button>
+            <button class="btn-reset" type="button" id="resetBtn">Reset demo data</button>
+          </div>
         </section>
 
         <p class="foot-note">TrybNetwork Trade &amp; Save is a simulation. Every balance, request, and trade on this page is virtual.</p>
@@ -1139,6 +1149,45 @@
         }).catch(function(err){
           if (window.console) console.warn("TrybNetwork admin: reset failed", err);
           toast("Reset failed", "The shared demo database did not accept the reset. The panel has been refreshed.", "err");
+        }).then(function(){ refresh(); });
+      });
+
+      var clearArmed = false, clearTimer = null;
+      $("clearHistoryBtn").addEventListener("click", function(){
+        var btn = $("clearHistoryBtn");
+        if (!clearArmed){
+          clearArmed = true;
+          btn.classList.add("confirm");
+          btn.textContent = "Tap again to confirm clearing";
+          clearTimer = setTimeout(function(){
+            clearArmed = false;
+            btn.classList.remove("confirm");
+            btn.textContent = "Clear history";
+          }, 5000);
+          return;
+        }
+        clearTimeout(clearTimer);
+        clearArmed = false;
+        btn.classList.remove("confirm");
+        btn.textContent = "Clear history";
+        if (!sb){ backendDown(); return; }
+        // History only: processed requests (approved / rejected) and
+        // settled bids (won / lost). Pending rows, profiles, wallets,
+        // balances, savings lots, and referrals are never touched.
+        var reqCount = DB.requests.filter(function(r){ return r.status === "approved" || r.status === "rejected"; }).length;
+        var bidCount = DB.bids.filter(function(b){ return b.status === "won" || b.status === "lost"; }).length;
+        Promise.all([
+          sb.from("tn_requests").delete().in("status", ["approved", "rejected"]),
+          sb.from("tn_bids").delete().in("status", ["won", "lost"])
+        ]).then(function(res){
+          for (var i = 0; i < res.length; i++){ if (res[i].error) throw res[i].error; }
+          toast("History cleared",
+            reqCount + " processed request" + (reqCount === 1 ? "" : "s") + " and " +
+            bidCount + " settled bid" + (bidCount === 1 ? "" : "s") +
+            " removed. Pending items, balances, and accounts were left untouched.");
+        }).catch(function(err){
+          if (window.console) console.warn("TrybNetwork admin: clear history failed", err);
+          toast("Clear failed", "The shared demo database did not accept that change. The panel has been refreshed.", "err");
         }).then(function(){ refresh(); });
       });
 
