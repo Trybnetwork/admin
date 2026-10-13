@@ -234,6 +234,42 @@
         color:var(--muted); margin:18px 0 10px; font-weight:800;
       }
 
+      /* ---------- Bid settlement (bulk, by direction) ---------- */
+      .bid-total{ font-size:14.5px; color:var(--muted); }
+      .bid-total b{ color:var(--text); font-size:17px; }
+      .split-bar{
+        height:12px; border-radius:999px; overflow:hidden; display:flex;
+        background:var(--red); margin:10px 0 7px;
+      }
+      .split-bar .high-fill{ background:var(--green); height:100%; transition:width .5s ease; }
+      @media (prefers-reduced-motion: reduce){ .split-bar .high-fill{ transition:none; } }
+      .split-labels{ display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; font-size:12.5px; }
+      .split-labels .h{ color:var(--green); font-weight:700; }
+      .split-labels .l{ color:var(--red); font-weight:700; }
+      .asset-split{ margin-top:14px; border-top:1px solid var(--line-soft); }
+      .asset-row{
+        display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;
+        padding:9px 0; border-bottom:1px solid var(--line-soft); font-size:13px;
+      }
+      .asset-row:last-child{ border-bottom:none; padding-bottom:2px; }
+      .asset-name{ font-weight:800; letter-spacing:.3px; }
+      .asset-name small{ color:var(--muted); font-weight:600; margin-left:6px; letter-spacing:0; }
+      .asset-row .h{ color:var(--green); font-weight:700; margin-left:auto; }
+      .asset-row .l{ color:var(--red); font-weight:700; }
+      .bid-actions{ margin-top:14px; }
+      .btn-reward-high{ background:var(--green); color:#06281B; }
+      .btn-reward-low{ background:var(--red); color:#2A0D12; }
+      .btn-reward-high:active, .btn-reward-low:active{ filter:brightness(1.12); }
+      .confirm-box{
+        margin-top:14px; border:1px solid var(--line); border-radius:12px;
+        background:var(--card-2); padding:13px;
+      }
+      .confirm-q{ font-size:15px; font-weight:700; }
+      .confirm-sub{ color:var(--muted); font-size:12.5px; margin-top:3px; line-height:1.5; }
+      .btn-confirm-high{ background:var(--green); color:#06281B; }
+      .btn-confirm-low{ background:var(--red); color:#2A0D12; }
+      .btn-cancel{ background:transparent; color:var(--muted); border:1.5px solid var(--line-soft) !important; }
+
       /* ---------- Sentiment ---------- */
       .sent-row{ padding:11px 0; border-bottom:1px solid var(--line-soft); }
       .sent-row:last-child{ border-bottom:none; padding-bottom:2px; }
@@ -407,7 +443,7 @@
 
         <section class="panel" aria-label="Pending bids">
           <h2>Pending Bids</h2>
-          <p class="sec-sub">Open High / Low bids placed in the Trade &amp; Save app, waiting on a result. Mark Win pays the stake back plus an 85% payout to that user's Main Balance; Mark Lose closes the bid with the stake forfeited — it was already locked when the bid was placed. All amounts are virtual.</p>
+          <p class="sec-sub">Open High / Low bids placed in the Trade &amp; Save app, waiting on a result. Settlement is by direction, not per person: Reward HIGH and every pending High bid wins — stake back plus an 85% payout to that user's Main Balance — while every pending Low bid loses its stake, which was already locked when the bid was placed. Reward LOW does the reverse. All amounts are virtual.</p>
           <div id="bidList"></div>
         </section>
 
@@ -675,62 +711,81 @@
           .then(function(){ actionBusy = false; refresh(); });
       }
 
-      /* ---------------- bid results ---------------- */
-      // Mark Win credits the user's Main Balance with the stake back plus
-      // the 85% payout (stake × 1.85 total) and records payout = stake ×
-      // 0.85 on the bid. Mark Lose takes nothing further — the stake was
-      // already locked when the bid was placed.
-      function resolveBid(userId, id, outcome){
+      /* ---------------- bid settlement (bulk, by direction) ---------------- */
+      // Settlement is direction-based, never per person: rewarding a side
+      // settles EVERY currently pending bid in one pass. Bids on the
+      // rewarded side are marked won — the user's Main Balance is credited
+      // stake × 1.85 (stake back plus the 85% payout) and the bid records
+      // payout = stake × 0.85. Bids on the other side are marked lost with
+      // nothing further taken — the stake was already locked when the bid
+      // was placed. Same tn_bids status/payout/decided_at fields and the
+      // same wallet updates as the old per-bid flow, so the user app picks
+      // the results up unchanged.
+      var rewardConfirm = null;   // "high" | "low" while a confirmation is showing
+      function settleAllBids(side){
         if (actionBusy) return;
         if (!sb){ backendDown(); return; }
         actionBusy = true;
-        sb.from("tn_bids").select("*").eq("id", id).maybeSingle()
+        // Re-read pending bids at confirm time so the settlement covers
+        // every bid that is pending right now, not a stale snapshot.
+        sb.from("tn_bids").select("*").eq("status", "pending")
           .then(function(res){
-            var bid = res.data;
-            if (!bid || bid.status !== "pending"){ actionBusy = false; refresh(); return; }
-            var prof = profileById[bid.user_id];
-            var label = prof ? (prof.full_name || prof.username) : "That user";
-            var won = outcome === "win";
-            var stake = Number(bid.stake) || 0;
-            var nowISO = new Date().toISOString();
-            var dirLabel = bid.direction === "high" ? "High" : "Low";
-
-            if (!won){
-              return sb.from("tn_bids")
-                .update({ status: "lost", decided_at: nowISO }).eq("id", id)
-                .then(function(ures){
-                  if (ures.error) throw ures.error;
-                  var w = walletOf(bid.user_id);
-                  toast("Bid marked Lost",
-                    label + "'s " + fmtUSD(stake) + " " + dirLabel + " bid on " + bid.asset +
-                    " lost — stake forfeited, Main Balance unchanged at " + fmtUSD(w.main_balance) + ".");
-                });
+            if (res.error) throw res.error;
+            var bids = res.data || [];
+            rewardConfirm = null;
+            if (!bids.length){
+              toast("Nothing to settle", "There are no pending bids right now.");
+              return null;
             }
-            return sb.from("tn_wallets").select("*").eq("user_id", bid.user_id).maybeSingle()
-              .then(function(wres){
-                var w = wres.data;
-                var bal = w ? Number(w.main_balance) || 0 : 0;
+            var nowISO = new Date().toISOString();
+            var wins = 0, losses = 0, totalCredited = 0;
+            var creditByUser = {};
+            bids.forEach(function(b){
+              var stake = Number(b.stake) || 0;
+              if (b.direction === side){
+                wins++;
                 var credit = round2(stake * (1 + BID_PAYOUT_RATE));
-                var newBal = round2(bal + credit);
-                var up = w
-                  ? sb.from("tn_wallets").update({ main_balance: newBal, updated_at: nowISO }).eq("user_id", bid.user_id)
-                  : sb.from("tn_wallets").insert({ user_id: bid.user_id, main_balance: newBal });
-                return up.then(function(ures){
-                  if (ures.error) throw ures.error;
-                  return sb.from("tn_bids")
-                    .update({ status: "won", payout: round2(stake * BID_PAYOUT_RATE), decided_at: nowISO }).eq("id", id)
-                    .then(function(bres){
-                      if (bres.error) throw bres.error;
-                      toast("Bid marked Won",
-                        label + "'s " + fmtUSD(stake) + " " + dirLabel + " bid on " + bid.asset + " paid " +
-                        fmtUSD(credit) + " to Main Balance. New balance: " + fmtUSD(newBal) + ".");
-                    });
-                });
+                totalCredited = round2(totalCredited + credit);
+                creditByUser[b.user_id] = round2((creditByUser[b.user_id] || 0) + credit);
+              } else {
+                losses++;
+              }
+            });
+            // Credit each winner's wallet once, with their combined total.
+            var chain = Promise.resolve();
+            Object.keys(creditByUser).forEach(function(uid){
+              chain = chain.then(function(){
+                return sb.from("tn_wallets").select("*").eq("user_id", uid).maybeSingle()
+                  .then(function(wres){
+                    var w = wres.data;
+                    var bal = w ? Number(w.main_balance) || 0 : 0;
+                    var newBal = round2(bal + creditByUser[uid]);
+                    var up = w
+                      ? sb.from("tn_wallets").update({ main_balance: newBal, updated_at: nowISO }).eq("user_id", uid)
+                      : sb.from("tn_wallets").insert({ user_id: uid, main_balance: newBal });
+                    return up.then(function(ures){ if (ures.error) throw ures.error; });
+                  });
               });
+            });
+            return chain.then(function(){
+              var updates = bids.map(function(b){
+                var stake = Number(b.stake) || 0;
+                var patch = b.direction === side
+                  ? { status: "won", payout: round2(stake * BID_PAYOUT_RATE), decided_at: nowISO }
+                  : { status: "lost", decided_at: nowISO };
+                return sb.from("tn_bids").update(patch).eq("id", b.id)
+                  .then(function(ures){ if (ures.error) throw ures.error; });
+              });
+              return Promise.all(updates).then(function(){
+                toast((side === "high" ? "HIGH" : "LOW") + " rewarded",
+                  wins + " bid" + (wins === 1 ? "" : "s") + " won · " + losses + " bid" + (losses === 1 ? "" : "s") +
+                  " lost. " + fmtUSD(totalCredited) + " credited to winners' Main Balances.");
+              });
+            });
           })
           .catch(function(err){
-            if (window.console) console.warn("TrybNetwork admin: bid action failed", err);
-            toast("Action failed", "The shared demo database did not accept that change. The panel has been refreshed.", "err");
+            if (window.console) console.warn("TrybNetwork admin: bulk settlement failed", err);
+            toast("Settlement failed", "The shared demo database did not accept that change. The panel has been refreshed.", "err");
           })
           .then(function(){ actionBusy = false; refresh(); });
       }
@@ -846,35 +901,89 @@
         }
         box.innerHTML = html;
       }
-      function bidRow(b){
-        var p = profileById[b.user_id] || {};
-        var high = b.direction === "high";
-        var stake = Number(b.stake) || 0;
-        return '<div class="req-item"><div class="req-top">' +
-          '<span class="req-user">' + esc(p.full_name || p.username || "Unknown user") + ' <span class="at">@' + esc(p.username || "") + "</span></span>" +
-          '<span class="req-type ' + (high ? "high" : "low") + '">' + (high ? "High" : "Low") + "</span>" +
-          '<span class="req-status">Pending</span></div>' +
-          '<div class="req-amt num">' + fmtUSD(stake) + ' <small>stake · ' + esc(b.asset || "") + "</small></div>" +
-          '<div class="req-meta">Placed ' + fmtTime(b.created_at) +
-          " · Mark Win pays " + fmtUSD(round2(stake * (1 + BID_PAYOUT_RATE))) + " to Main Balance</div>" +
-          '<div class="req-btns">' +
-            '<button class="btn-approve" type="button" data-bid="win" data-user="' + esc(b.user_id) + '" data-id="' + esc(b.id) + '">Mark Win</button>' +
-            '<button class="btn-reject" type="button" data-bid="lose" data-user="' + esc(b.user_id) + '" data-id="' + esc(b.id) + '">Mark Lose</button>' +
-          "</div></div>";
+      function splitOf(bids){
+        var s = { high: { n: 0, stake: 0 }, low: { n: 0, stake: 0 } };
+        bids.forEach(function(b){
+          var stake = Number(b.stake) || 0;
+          if (b.direction === "high"){ s.high.n++; s.high.stake = round2(s.high.stake + stake); }
+          else if (b.direction === "low"){ s.low.n++; s.low.stake = round2(s.low.stake + stake); }
+        });
+        return s;
       }
+      function bidWord(n){ return n + " bid" + (n === 1 ? "" : "s"); }
       function renderBids(){
         var box = $("bidList");
         var bids = DB.bids.filter(function(b){ return b.status === "pending"; });
         if (!DB.profiles.length){
+          rewardConfirm = null;
           box.innerHTML = '<div class="empty"><b>No pending bids</b>' +
             "High / Low bids placed by registered users in the Trade &amp; Save app will appear here for a result.</div>";
           return;
         }
         if (!bids.length){
+          rewardConfirm = null;
           box.innerHTML = '<div class="empty">No pending bids right now.</div>';
           return;
         }
-        box.innerHTML = bids.map(bidRow).join("");
+        var s = splitOf(bids);
+        var total = bids.length;
+        var hp = Math.round(s.high.n / total * 100);
+
+        // Per-asset split, information only — known assets first.
+        var byAsset = {};
+        bids.forEach(function(b){
+          var a = b.asset || "—";
+          if (!byAsset[a]) byAsset[a] = [];
+          byAsset[a].push(b);
+        });
+        var assetOrder = Object.keys(byAsset).sort(function(x, y){
+          var xi = Object.keys(ASSET_NAMES).indexOf(x), yi = Object.keys(ASSET_NAMES).indexOf(y);
+          if (xi === -1 && yi === -1) return x < y ? -1 : 1;
+          if (xi === -1) return 1;
+          if (yi === -1) return -1;
+          return xi - yi;
+        });
+        var assetHtml = assetOrder.map(function(a){
+          var as = splitOf(byAsset[a]);
+          return '<div class="asset-row">' +
+            '<span class="asset-name">' + esc(a) + "<small>" + esc(ASSET_NAMES[a] || "") + "</small></span>" +
+            '<span class="h num">High · ' + as.high.n + " · " + fmtUSD(as.high.stake) + "</span>" +
+            '<span class="l num">Low · ' + as.low.n + " · " + fmtUSD(as.low.stake) + "</span></div>";
+        }).join("");
+
+        var html =
+          '<div class="bid-total"><b class="num">' + total + "</b> pending bid" + (total === 1 ? "" : "s") + " awaiting a result</div>" +
+          '<div class="split-bar"><div class="high-fill" style="width:' + hp + '%"></div></div>' +
+          '<div class="split-labels">' +
+            '<span class="h num">HIGH · ' + bidWord(s.high.n) + " · " + fmtUSD(s.high.stake) + " staked (" + hp + "%)</span>" +
+            '<span class="l num">LOW · ' + bidWord(s.low.n) + " · " + fmtUSD(s.low.stake) + " staked (" + (100 - hp) + "%)</span>" +
+          "</div>" +
+          '<div class="asset-split">' + assetHtml + "</div>";
+
+        if (rewardConfirm){
+          var side = rewardConfirm;
+          var winSide = side === "high" ? s.high : s.low;
+          var loseSide = side === "high" ? s.low : s.high;
+          var creditTotal = 0;
+          bids.forEach(function(b){
+            if (b.direction === side) creditTotal = round2(creditTotal + round2((Number(b.stake) || 0) * (1 + BID_PAYOUT_RATE)));
+          });
+          html += '<div class="confirm-box">' +
+            '<div class="confirm-q">Reward ' + (side === "high" ? "HIGH" : "LOW") + "? " +
+              bidWord(winSide.n) + " win · " + bidWord(loseSide.n) + " lose</div>" +
+            '<div class="confirm-sub">Winners are credited ' + fmtUSD(creditTotal) +
+              " in total (stake back plus 85% payout). Losers forfeit their locked stake. This settles every pending bid at once.</div>" +
+            '<div class="req-btns">' +
+              '<button class="' + (side === "high" ? "btn-confirm-high" : "btn-confirm-low") + '" type="button" data-confirm-settle="1">Confirm — settle all</button>' +
+              '<button class="btn-cancel" type="button" data-cancel-settle="1">Cancel</button>' +
+            "</div></div>";
+        } else {
+          html += '<div class="req-btns bid-actions">' +
+            '<button class="btn-reward-high" type="button" data-reward="high">REWARD HIGH</button>' +
+            '<button class="btn-reward-low" type="button" data-reward="low">REWARD LOW</button>' +
+          "</div>";
+        }
+        box.innerHTML = html;
       }
       function renderSentiment(){
         var data = collectSentiment();
@@ -969,9 +1078,21 @@
         actOnRequest(btn.getAttribute("data-user"), btn.getAttribute("data-id"), btn.getAttribute("data-act"));
       });
       $("bidList").addEventListener("click", function(e){
-        var btn = e.target.closest("button[data-bid]");
-        if (!btn) return;
-        resolveBid(btn.getAttribute("data-user"), btn.getAttribute("data-id"), btn.getAttribute("data-bid"));
+        var rewardBtn = e.target.closest("button[data-reward]");
+        if (rewardBtn){
+          if (actionBusy) return;
+          rewardConfirm = rewardBtn.getAttribute("data-reward");
+          renderBids();
+          return;
+        }
+        if (e.target.closest("button[data-confirm-settle]")){
+          if (rewardConfirm) settleAllBids(rewardConfirm);
+          return;
+        }
+        if (e.target.closest("button[data-cancel-settle]")){
+          rewardConfirm = null;
+          renderBids();
+        }
       });
       $("refreshBtn").addEventListener("click", function(){
         refresh().then(function(){
