@@ -180,6 +180,13 @@
         font-size:10.5px; font-weight:800; letter-spacing:.4px;
         padding:2px 7px; border-radius:999px;
       }
+      .miner-status{
+        display:inline-block; vertical-align:1px; margin-left:5px;
+        font-size:10.5px; font-weight:800; letter-spacing:.4px;
+        padding:1px 7px; border-radius:999px;
+      }
+      .miner-status.running{ background:var(--green-bg); color:var(--green); }
+      .miner-status.idle{ background:rgba(154,163,199,.14); color:var(--muted); }
       .u-bal{ text-align:right; flex:0 0 auto; min-width:74px; }
       .u-bal .b{ font-weight:800; font-size:15px; }
       .u-bal .k{ font-size:10.5px; letter-spacing:.8px; text-transform:uppercase; color:var(--muted); }
@@ -439,7 +446,7 @@
           <div class="stat"><div class="v num" id="statUsers">0</div><div class="k">Registered users</div></div>
           <div class="stat"><div class="v num gold" id="statPending">0</div><div class="k">Pending requests</div></div>
           <div class="stat"><div class="v num" id="statMain">$0.00</div><div class="k">Total Main</div></div>
-          <div class="stat"><div class="v num" id="statSavings">$0.00</div><div class="k">Total Savings</div></div>
+          <div class="stat"><div class="v num" id="statMining">$0.00</div><div class="k">Total Mining</div></div>
         </div>
 
         <section class="panel" aria-label="Deposit and withdrawal requests">
@@ -497,17 +504,19 @@
          bids from ANY device — no shared browser storage involved.
            tn_profiles      id, full_name, username, email, referral_code,
                             referred_by, created_at
-           tn_wallets       user_id, main_balance, savings_interest,
+           tn_wallets       user_id, main_balance,
                             traded_volume, bonus_locked, updated_at
-           tn_savings_lots  id, user_id, amount, unlock_at, created_at
+           tn_miners        id, user_id, tier, mining_balance,
+                            miner_status, miner_started_at, purchased_at,
+                            created_at
            tn_requests      id, user_id, type, amount, status, method,
                             created_at, decided_at
            tn_bids          id, user_id, asset, direction, stake, status,
                             payout, created_at, decided_at
            tn_referrals     id, referrer_id, referred_id, reward_paid,
                             created_at
-         Realtime subscriptions on tn_requests / tn_bids / tn_wallets keep
-         the panel live, with a 15-second polling fallback. All funds are
+         Realtime subscriptions on tn_requests / tn_bids / tn_wallets /
+         tn_miners keep the panel live, with a 15-second polling fallback. All funds are
          virtual — this is a simulation.
          ================================================================== */
       var ADMIN_PIN = "1234";
@@ -525,7 +534,7 @@
       var DB = {
         profiles: [],        // tn_profiles rows
         wallets: {},         // user_id -> tn_wallets row
-        lotsByUser: {},      // user_id -> [tn_savings_lots rows]
+        minersByUser: {},    // user_id -> [tn_miners rows]
         requests: [],        // tn_requests rows, newest first
         bids: [],            // tn_bids rows, newest first
         referrals: []        // tn_referrals rows
@@ -536,22 +545,75 @@
         DB.profiles.forEach(function(p){ if (p && p.id) profileById[p.id] = p; });
       }
       function walletOf(userId){
-        return DB.wallets[userId] || { user_id: userId, main_balance: 0, savings_interest: 0 };
+        return DB.wallets[userId] || { user_id: userId, main_balance: 0 };
       }
-      function savingsOf(userId){
-        var lots = DB.lotsByUser[userId] || [];
+      /* -------- mining (tn_miners) -------- */
+      // One row per purchased miner. Tier and balance field names are read
+      // tolerantly; status is the row's own status when present, otherwise
+      // derived from the 24-hour run window (running_until, or started_at
+      // + 24h) — a miner the user started over 24 hours ago has stopped.
+      function minersOf(userId){
+        return DB.minersByUser[userId] || [];
+      }
+      function minerTier(m){
+        return (m && (m.tier || m.miner_tier || m.name || m.engine || m.plan)) || "Miner";
+      }
+      function minerBalance(m){
+        if (!m) return 0;
+        var v = m.mining_balance != null ? m.mining_balance
+              : m.miner_balance != null ? m.miner_balance
+              : m.balance != null ? m.balance
+              : m.earnings != null ? m.earnings : m.accrued;
+        return Number(v) || 0;
+      }
+      function miningBalanceOf(userId){
         var sum = 0;
-        lots.forEach(function(l){ sum += Number(l.amount) || 0; });
-        return sum + (Number(walletOf(userId).savings_interest) || 0);
+        minersOf(userId).forEach(function(m){ sum += minerBalance(m); });
+        return round2(sum);
+      }
+      function minerStatus(m){
+        if (!m) return "idle";
+        var st = (typeof m.miner_status === "string" && m.miner_status) ? m.miner_status
+               : (typeof m.status === "string" && m.status) ? m.status : null;
+        if (st) return st.toLowerCase() === "running" ? "running" : "idle";
+        if (m.is_running != null) return m.is_running ? "running" : "idle";
+        var now = Date.now();
+        var until = m.running_until || m.miner_running_until || m.ends_at || m.run_until || m.stop_at;
+        if (until){
+          var t = new Date(until).getTime();
+          if (!isNaN(t)) return t > now ? "running" : "idle";
+        }
+        var started = m.miner_started_at || m.started_at || m.last_started_at || m.last_start_at || m.activated_at;
+        if (started){
+          var s = new Date(started).getTime();
+          if (!isNaN(s)) return (now - s) < 24 * 60 * 60 * 1000 ? "running" : "idle";
+        }
+        return "idle";
+      }
+      function primaryMiner(userId){
+        var list = minersOf(userId);
+        if (!list.length) return null;
+        var best = list[0], bestT = new Date(best.created_at || 0).getTime() || 0;
+        list.forEach(function(m){
+          var t = new Date(m.created_at || 0).getTime() || 0;
+          if (t >= bestT){ best = m; bestT = t; }
+        });
+        return best;
       }
       function round2(n){ return Math.round((Number(n) || 0) * 100) / 100; }
 
       function fetchAll(){
         if (!sb) return Promise.resolve(false);
+        // tn_miners is read tolerantly: if the table is not there yet the
+        // panel still loads, with every user simply showing "No miner".
+        var minersQuery = sb.from("tn_miners").select("*").then(
+          function(r){ return r && r.error ? { data: [] } : r; },
+          function(){ return { data: [] }; }
+        );
         return Promise.all([
           sb.from("tn_profiles").select("*").order("created_at", { ascending: true }),
           sb.from("tn_wallets").select("*"),
-          sb.from("tn_savings_lots").select("*"),
+          minersQuery,
           sb.from("tn_requests").select("*").order("created_at", { ascending: false }),
           sb.from("tn_bids").select("*").order("created_at", { ascending: false }),
           sb.from("tn_referrals").select("*")
@@ -562,10 +624,10 @@
           DB.profiles = res[0].data || [];
           DB.wallets = {};
           (res[1].data || []).forEach(function(w){ if (w && w.user_id) DB.wallets[w.user_id] = w; });
-          DB.lotsByUser = {};
-          (res[2].data || []).forEach(function(l){
-            if (!l || !l.user_id) return;
-            (DB.lotsByUser[l.user_id] = DB.lotsByUser[l.user_id] || []).push(l);
+          DB.minersByUser = {};
+          (res[2].data || []).forEach(function(m){
+            if (!m || !m.user_id) return;
+            (DB.minersByUser[m.user_id] = DB.minersByUser[m.user_id] || []).push(m);
           });
           DB.requests = res[3].data || [];
           DB.bids = res[4].data || [];
@@ -825,15 +887,15 @@
 
       /* ---------------- rendering ---------------- */
       function renderStats(){
-        var totalMain = 0, totalSavings = 0;
+        var totalMain = 0, totalMining = 0;
         DB.profiles.forEach(function(p){
           totalMain += Number(walletOf(p.id).main_balance) || 0;
-          totalSavings += savingsOf(p.id);
+          totalMining += miningBalanceOf(p.id);
         });
         $("statUsers").textContent = DB.profiles.length;
         $("statPending").textContent = DB.requests.filter(function(r){ return r.status === "pending"; }).length;
         $("statMain").textContent = fmtUSD(totalMain);
-        $("statSavings").textContent = fmtUSD(totalSavings);
+        $("statMining").textContent = fmtUSD(totalMining);
       }
       function resolveReferrer(p){
         if (!p.referred_by) return null;
@@ -854,6 +916,13 @@
           var w = walletOf(p.id);
           var pend = DB.requests.filter(function(r){ return r.user_id === p.id && r.status === "pending"; }).length;
           var referrer = resolveReferrer(p);
+          var miners = minersOf(p.id);
+          var primary = primaryMiner(p.id);
+          var anyRunning = miners.some(function(m){ return minerStatus(m) === "running"; });
+          var minerLine = primary
+            ? "<br>Miner · " + esc(minerTier(primary)) +
+              '<span class="miner-status ' + (anyRunning ? "running" : "idle") + '">' + (anyRunning ? "Running" : "Idle") + "</span>"
+            : "<br>No miner";
           return '<div class="user-row">' +
             '<span class="avatar">' + esc(avatarInitials(p.full_name || p.username)) + "</span>" +
             '<div class="u-main"><div class="u-name">' + esc(p.full_name || p.username) +
@@ -862,9 +931,10 @@
               "<br>Joined " + fmtTime(p.created_at) +
               (p.referral_code ? " · Code " + esc(p.referral_code) : "") +
               (p.referred_by ? "<br>Referred by " + esc(referrer ? (referrer.full_name || referrer.username) : p.referred_by) : "") +
+              minerLine +
               "</div></div>" +
             '<div class="u-bal"><div class="b num">' + fmtUSD(w.main_balance) + '</div><div class="k">Main</div></div>' +
-            '<div class="u-bal"><div class="b num">' + fmtUSD(savingsOf(p.id)) + '</div><div class="k">Savings</div></div>' +
+            '<div class="u-bal"><div class="b num">' + fmtUSD(miningBalanceOf(p.id)) + '</div><div class="k">Mining</div></div>' +
             "</div>";
         }).join("");
       }
@@ -1133,7 +1203,7 @@
         // Wipe the shared demo tables in dependency order; auth.users
         // rows are left alone.
         var wipe = [
-          ["tn_bids", "id"], ["tn_requests", "id"], ["tn_savings_lots", "id"],
+          ["tn_bids", "id"], ["tn_requests", "id"], ["tn_miners", "id"],
           ["tn_referrals", "id"], ["tn_wallets", "user_id"], ["tn_profiles", "id"]
         ];
         var chain = Promise.resolve();
@@ -1173,7 +1243,7 @@
         if (!sb){ backendDown(); return; }
         // History only: processed requests (approved / rejected) and
         // settled bids (won / lost). Pending rows, profiles, wallets,
-        // balances, savings lots, and referrals are never touched.
+        // balances, miners, and referrals are never touched.
         var reqCount = DB.requests.filter(function(r){ return r.status === "approved" || r.status === "rejected"; }).length;
         var bidCount = DB.bids.filter(function(b){ return b.status === "won" || b.status === "lost"; }).length;
         Promise.all([
@@ -1198,7 +1268,7 @@
       function startRealtime(){
         if (!sb || realtimeStarted) return;
         realtimeStarted = true;
-        ["tn_requests", "tn_bids", "tn_wallets"].forEach(function(t){
+        ["tn_requests", "tn_bids", "tn_wallets", "tn_miners"].forEach(function(t){
           try {
             sb.channel("tn-admin-" + t)
               .on("postgres_changes", { event: "*", schema: "public", table: t }, function(){ refresh(); })
