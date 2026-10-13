@@ -435,120 +435,98 @@
 
     <div id="toasts" aria-live="polite"></div>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
     <script>
       "use strict";
       /* ==================================================================
          TrybNetwork Admin Panel — companion to the "Trade & Save" user app.
-         Both pages are static and served from the same origin, so they
-         share localStorage. The user app stores:
-           "trybnetwork-accounts-v1"            -> array of account records
-           "trybnetwork-trade-save-v2::<user>"  -> that user's app state
-           "trybnetwork-session-v1"             -> signed-in username
-           "trybnetwork-trade-save-v2"          -> legacy single-user state
-         This panel discovers those keys defensively (known keys first,
-         then a pattern scan), reads them, and writes approvals back to
-         the exact same records so the user app sees the result live.
-         All funds are virtual — this is a simulation.
+         Data lives in Supabase (tn_* tables, same project as Alora Bank,
+         demo-grade open RLS), so this panel sees users, requests, and
+         bids from ANY device — no shared browser storage involved.
+           tn_profiles      id, full_name, username, email, referral_code,
+                            referred_by, created_at
+           tn_wallets       user_id, main_balance, savings_interest,
+                            traded_volume, bonus_locked, updated_at
+           tn_savings_lots  id, user_id, amount, unlock_at, created_at
+           tn_requests      id, user_id, type, amount, status,
+                            created_at, decided_at
+           tn_bids          id, user_id, asset, direction, stake, status,
+                            payout, created_at, decided_at
+           tn_referrals     id, referrer_id, referred_id, reward_paid,
+                            created_at
+         Realtime subscriptions on tn_requests / tn_bids / tn_wallets keep
+         the panel live, with a 15-second polling fallback. All funds are
+         virtual — this is a simulation.
          ================================================================== */
       var ADMIN_PIN = "1234";
-      var WELCOME_BONUS = 3;        // mirrors the user app: locked until traded
       var REFERRAL_REWARD = 3;      // USDT credited to the referrer
-      var REFERRAL_DEPOSIT = 12;    // first deposit of this size triggers it
       var BID_PAYOUT_RATE = 0.85;   // mirrors the user app: 85% profit on a won bid
-      var BID_BONUS_UNLOCK_VOLUME = 10; // mirrors the user app's bonus holdback
 
-      var KNOWN = {
-        accounts: "trybnetwork-accounts-v1",
-        session: "trybnetwork-session-v1",
-        legacy: "trybnetwork-trade-save-v2",
-        statePrefix: "trybnetwork-trade-save-v2::"
+      var SUPABASE_URL = "https://zvubytosshkxpbpvgcsw.supabase.co";
+      var SUPABASE_ANON_KEY = "sb_publishable_c1sl1Mw4Y5EMWjkmYSzEow_m5Yowqk0";
+      var sb = null;
+      if (window.supabase && typeof window.supabase.createClient === "function"){
+        try { sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); } catch(e){ sb = null; }
+      }
+
+      /* ---------------- in-memory snapshot of the backend ---------------- */
+      var DB = {
+        profiles: [],        // tn_profiles rows
+        wallets: {},         // user_id -> tn_wallets row
+        lotsByUser: {},      // user_id -> [tn_savings_lots rows]
+        requests: [],        // tn_requests rows, newest first
+        bids: [],            // tn_bids rows, newest first
+        referrals: []        // tn_referrals rows
       };
-      // Resolved storage locations (updated if discovery finds variants).
-      var keys = {
-        accounts: KNOWN.accounts,
-        session: KNOWN.session,
-        legacy: KNOWN.legacy,
-        statePrefix: KNOWN.statePrefix,
-        stateByUser: {}   // username (as stored) -> exact localStorage key
-      };
+      var profileById = {};
+      function reindex(){
+        profileById = {};
+        DB.profiles.forEach(function(p){ if (p && p.id) profileById[p.id] = p; });
+      }
+      function walletOf(userId){
+        return DB.wallets[userId] || { user_id: userId, main_balance: 0, savings_interest: 0 };
+      }
+      function savingsOf(userId){
+        var lots = DB.lotsByUser[userId] || [];
+        var sum = 0;
+        lots.forEach(function(l){ sum += Number(l.amount) || 0; });
+        return sum + (Number(walletOf(userId).savings_interest) || 0);
+      }
+      function round2(n){ return Math.round((Number(n) || 0) * 100) / 100; }
 
-      /* ---------------- storage helpers ---------------- */
-      function lsGet(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }
-      function lsSet(k, v){ try { localStorage.setItem(k, v); return true; } catch(e){ return false; } }
-      function lsRemove(k){ try { localStorage.removeItem(k); } catch(e){} }
-      function lsKeys(){
-        var out = [];
-        try { for (var i = 0; i < localStorage.length; i++){ var k = localStorage.key(i); if (k) out.push(k); } } catch(e){}
-        return out;
-      }
-      function parseJSON(raw){
-        if (typeof raw !== "string" || !raw) return null;
-        try { return JSON.parse(raw); } catch(e){ return null; }
-      }
-      function isAccountLike(a){
-        return !!a && typeof a === "object" &&
-          typeof a.username === "string" && a.username &&
-          (typeof a.name === "string" || typeof a.email === "string");
-      }
-      function isStateLike(s){
-        return !!s && typeof s === "object" && !Array.isArray(s) &&
-          typeof s.main === "number";
-      }
-
-      /* ---------------- discovery ---------------- */
-      // Find the accounts array: known key first, then scan for any array
-      // of account-like records under a plausible key.
-      function discoverAccounts(){
-        var a = parseJSON(lsGet(keys.accounts));
-        if (Array.isArray(a) && a.some(isAccountLike)) return a.filter(isAccountLike);
-        var all = lsKeys();
-        for (var i = 0; i < all.length; i++){
-          var k = all[i];
-          if (!/account|user/i.test(k)) continue;
-          var v = parseJSON(lsGet(k));
-          if (Array.isArray(v) && v.length && v.some(isAccountLike)){
-            keys.accounts = k;
-            return v.filter(isAccountLike);
+      function fetchAll(){
+        if (!sb) return Promise.resolve(false);
+        return Promise.all([
+          sb.from("tn_profiles").select("*").order("created_at", { ascending: true }),
+          sb.from("tn_wallets").select("*"),
+          sb.from("tn_savings_lots").select("*"),
+          sb.from("tn_requests").select("*").order("created_at", { ascending: false }),
+          sb.from("tn_bids").select("*").order("created_at", { ascending: false }),
+          sb.from("tn_referrals").select("*")
+        ]).then(function(res){
+          for (var i = 0; i < res.length; i++){
+            if (res[i].error) throw res[i].error;
           }
-        }
-        return Array.isArray(a) ? a.filter(isAccountLike) : [];
+          DB.profiles = res[0].data || [];
+          DB.wallets = {};
+          (res[1].data || []).forEach(function(w){ if (w && w.user_id) DB.wallets[w.user_id] = w; });
+          DB.lotsByUser = {};
+          (res[2].data || []).forEach(function(l){
+            if (!l || !l.user_id) return;
+            (DB.lotsByUser[l.user_id] = DB.lotsByUser[l.user_id] || []).push(l);
+          });
+          DB.requests = res[3].data || [];
+          DB.bids = res[4].data || [];
+          DB.referrals = res[5].data || [];
+          reindex();
+          return true;
+        }).catch(function(err){
+          if (window.console) console.warn("TrybNetwork admin: backend fetch failed", err);
+          return false;
+        });
       }
-      // Find one user's state object; remember the exact key for write-back.
-      function discoverState(username){
-        var want = String(username || "");
-        var direct = lsGet(keys.statePrefix + want);
-        var s = parseJSON(direct);
-        if (isStateLike(s)){ keys.stateByUser[want] = keys.statePrefix + want; return s; }
-        // Case-insensitive / variant scan: any key ending in "::username"
-        // or naming this user, holding a state-like object.
-        var all = lsKeys(), low = want.toLowerCase();
-        for (var i = 0; i < all.length; i++){
-          var k = all[i];
-          if (k === keys.accounts || k === keys.session) continue;
-          if (k.toLowerCase().indexOf(low) === -1) continue;
-          var v = parseJSON(lsGet(k));
-          if (isStateLike(v)){ keys.stateByUser[want] = k; return v; }
-        }
-        return null;
-      }
-      function stateKeyFor(username){
-        return keys.stateByUser[String(username || "")] || (keys.statePrefix + username);
-      }
-      function saveState(username, s){
-        return lsSet(stateKeyFor(username), JSON.stringify(s));
-      }
-      function saveAccounts(list){
-        return lsSet(keys.accounts, JSON.stringify(list));
-      }
-      function findAccount(list, id){
-        var key = String(id || "").trim().toLowerCase();
-        if (!key) return null;
-        for (var i = 0; i < list.length; i++){
-          var a = list[i];
-          if (String(a.username || "").toLowerCase() === key ||
-              String(a.email || "").toLowerCase() === key) return a;
-        }
-        return null;
+      function refresh(){
+        return fetchAll().then(function(ok){ if (unlocked) renderAll(); return ok; });
       }
 
       /* ---------------- formatting ---------------- */
@@ -558,20 +536,20 @@
           .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
       }
       function fmtUSD(n){
+        n = Number(n) || 0;
         var sign = n < 0 ? "-$" : "$";
         return sign + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       }
       function fmtUSDT(n){
-        return Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " USDT";
+        return (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " USDT";
       }
       function fmtTime(ts){
-        var t = Number(ts);
-        if (!isFinite(t) || t <= 0) return "—";
-        var d = new Date(t);
+        if (ts == null || ts === "") return "—";
+        var d = new Date(ts);
+        if (isNaN(d.getTime())) return "—";
         return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) + ", " +
                d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
       }
-      function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
       function avatarInitials(name){
         var parts = String(name || "").trim().split(/\s+/).filter(Boolean);
         if (!parts.length) return "TN";
@@ -589,302 +567,265 @@
           setTimeout(function(){ el.remove(); }, 420);
         }, 4600);
       }
-
-      /* ---------------- data snapshot ---------------- */
-      // One read of everything the panels need, straight from shared storage.
-      function loadSnapshot(){
-        var accounts = discoverAccounts();
-        var states = {};   // username -> state object (or null)
-        accounts.forEach(function(a){ states[a.username] = discoverState(a.username); });
-        // Legacy single-user state (pre-accounts saves) can still feed
-        // sentiment if no per-account states exist.
-        var legacy = parseJSON(lsGet(keys.legacy));
-        if (!isStateLike(legacy)) legacy = null;
-        return { accounts: accounts, states: states, legacy: legacy };
-      }
-      function userRequests(snap){
-        // Real requests are the ones a user made from their own account
-        // (self:true in the user app). Simulated seed entries (self falsy)
-        // belong to the user app's internal demo feed and are not shown.
-        var out = [];
-        snap.accounts.forEach(function(a){
-          var s = snap.states[a.username];
-          if (!s || !Array.isArray(s.adminRequests)) return;
-          s.adminRequests.forEach(function(r){
-            if (r && r.self) out.push({ acct: a, req: r });
-          });
-        });
-        out.sort(function(x, y){ return (y.req.time || 0) - (x.req.time || 0); });
-        return out;
-      }
-      function userBids(snap){
-        // Pending High/Low bids are the user app's openTrades: the stake
-        // was already deducted from Main Balance when the bid was placed,
-        // and the bid sits there until a result closes it into trades[].
-        var out = [];
-        snap.accounts.forEach(function(a){
-          var s = snap.states[a.username];
-          if (!s || !Array.isArray(s.openTrades)) return;
-          s.openTrades.forEach(function(t){
-            if (t && t.id) out.push({ acct: a, bid: t });
-          });
-        });
-        out.sort(function(x, y){ return (y.bid.openedAt || 0) - (x.bid.openedAt || 0); });
-        return out;
+      function backendDown(){
+        toast("Backend unreachable", "Could not reach the shared demo database. Check the connection and tap Refresh data.", "err");
       }
 
       /* ---------------- referral reward ---------------- */
-      // Mirrors the user app: when a referred user's first deposit of
-      // 12 USDT or more is approved, credit the referrer's Main Balance
-      // with 3 USDT inside the referrer's own saved state, once only.
-      // A smaller approved deposit does not consume the trigger.
-      function referralRewardFor(accounts, depositorUsername, depositAmount){
-        var acct = findAccount(accounts, depositorUsername);
-        if (!acct || !acct.referredBy || acct.refRewardDone) return null;
-        if (!(Number(depositAmount) >= REFERRAL_DEPOSIT)) return null;
-        acct.refRewardDone = true;
-        saveAccounts(accounts);
-        var referrer = findAccount(accounts, acct.referredBy);
-        if (!referrer) return null;
-        var rs = discoverState(referrer.username);
-        if (!rs) return null;
-        if (Array.isArray(rs.referrals)){
-          rs.referrals.forEach(function(x){
-            if (x && x.account === acct.username && x.status !== "qualified"){
-              x.status = "qualified"; x.depositTime = Date.now();
-            }
-          });
-        }
-        rs.main = (typeof rs.main === "number" ? rs.main : 0) + REFERRAL_REWARD;
-        rs.referralEarned = (typeof rs.referralEarned === "number" ? rs.referralEarned : 0) + REFERRAL_REWARD;
-        if (!Array.isArray(rs.txs)) rs.txs = [];
-        rs.txs.unshift({
-          id: uid(), type: "referral", amount: REFERRAL_REWARD,
-          note: "Referral reward · " + (acct.name || acct.username) + " made a first deposit of 12 USDT",
-          time: Date.now()
-        });
-        if (rs.txs.length > 120) rs.txs.length = 120;
-        saveState(referrer.username, rs);
-        return referrer;
+      // After a deposit is approved: if it is that user's FIRST approved
+      // deposit and an unpaid tn_referrals row names them as referred_id,
+      // credit the referrer's Main Balance with 3 USDT and mark it paid.
+      function maybeReferralReward(userId){
+        return sb.from("tn_requests").select("id")
+          .eq("user_id", userId).eq("type", "deposit").eq("status", "approved")
+          .then(function(res){
+            var rows = res.data || [];
+            if (rows.length !== 1) return null;   // not the first approved deposit
+            return sb.from("tn_referrals").select("*")
+              .eq("referred_id", userId).eq("reward_paid", false).limit(1)
+              .then(function(rres){
+                var ref = (rres.data || [])[0];
+                if (!ref) return null;
+                return sb.from("tn_wallets").select("*").eq("user_id", ref.referrer_id).maybeSingle()
+                  .then(function(wres){
+                    var w = wres.data;
+                    var bal = w ? Number(w.main_balance) || 0 : 0;
+                    var up = w
+                      ? sb.from("tn_wallets").update({ main_balance: round2(bal + REFERRAL_REWARD), updated_at: new Date().toISOString() }).eq("user_id", ref.referrer_id)
+                      : sb.from("tn_wallets").insert({ user_id: ref.referrer_id, main_balance: REFERRAL_REWARD });
+                    return up.then(function(ures){
+                      if (ures.error) throw ures.error;
+                      return sb.from("tn_referrals").update({ reward_paid: true }).eq("id", ref.id);
+                    }).then(function(){
+                      var rp = profileById[ref.referrer_id];
+                      return rp ? (rp.full_name || rp.username) : "the referrer";
+                    });
+                  });
+              });
+          }).catch(function(){ return null; });
       }
 
       /* ---------------- approve / reject ---------------- */
-      function actOnRequest(username, id, act){
-        var snap = loadSnapshot();
-        var acct = findAccount(snap.accounts, username);
-        var s = acct ? snap.states[acct.username] : null;
-        if (!acct || !s || !Array.isArray(s.adminRequests)){
-          toast("Could not load that account", "The shared demo data may have changed. The panel has been refreshed.", "err");
-          renderAll();
-          return;
-        }
-        var r = null;
-        s.adminRequests.forEach(function(x){ if (x && x.id === id) r = x; });
-        if (!r || r.status !== "pending"){ renderAll(); return; }
-        var label = acct.name || acct.username;
-        var amount = Number(r.amount) || 0;
+      var actionBusy = false;
+      function actOnRequest(userId, id, act){
+        if (actionBusy) return;
+        if (!sb){ backendDown(); return; }
+        actionBusy = true;
+        sb.from("tn_requests").select("*").eq("id", id).maybeSingle()
+          .then(function(res){
+            var r = res.data;
+            if (!r || r.status !== "pending"){ actionBusy = false; refresh(); return; }
+            var prof = profileById[r.user_id];
+            var label = prof ? (prof.full_name || prof.username) : "That user";
+            var amount = Number(r.amount) || 0;
+            var nowISO = new Date().toISOString();
 
-        if (act === "approve"){
-          if (r.type === "withdraw"){
-            // Part of Main can be held back by the untraded welcome bonus,
-            // exactly as the user app enforces it.
-            var locked = s.bonusLocked ? Math.min(WELCOME_BONUS, Math.max(0, s.main)) : 0;
-            var movable = Math.max(0, s.main - locked);
-            if (amount > movable){
-              toast("Cannot approve withdrawal",
-                label + "'s available Main Balance is " + fmtUSD(movable) + " — not enough for a " + fmtUSDT(amount) + " withdrawal.", "err");
-              return;
+            if (act === "reject"){
+              return sb.from("tn_requests")
+                .update({ status: "rejected", decided_at: nowISO }).eq("id", id)
+                .then(function(ures){
+                  if (ures.error) throw ures.error;
+                  toast("Request rejected", label + "'s " + (r.type === "deposit" ? "deposit" : "withdrawal") +
+                    " of " + fmtUSDT(amount) + " was rejected. Balance unchanged.");
+                });
             }
-          }
-          if (r.type === "deposit") s.main += amount; else s.main -= amount;
-          r.status = "approved";
-          r.balanceAfter = s.main; r.balance = s.main;
-          if (!Array.isArray(s.txs)) s.txs = [];
-          s.txs.unshift({
-            id: uid(), type: r.type, amount: amount,
-            note: r.type === "deposit" ? "Deposit approved · credited to Main Balance"
-                                       : "Withdrawal approved · paid out of Main Balance",
-            time: Date.now()
-          });
-          if (s.txs.length > 120) s.txs.length = 120;
-          saveState(acct.username, s);
-          var rewarded = null;
-          if (r.type === "deposit") rewarded = referralRewardFor(snap.accounts, acct.username, amount);
-          toast("Request approved",
-            label + "'s " + (r.type === "deposit" ? "deposit" : "withdrawal") + " of " + fmtUSDT(amount) +
-            " applied to Main Balance. New balance: " + fmtUSD(s.main) + "." +
-            (rewarded ? " Referral reward of 3 USDT credited to " + (rewarded.name || rewarded.username) + "." : ""));
-        } else {
-          r.status = "rejected";
-          r.balanceAfter = s.main;
-          if (!Array.isArray(s.txs)) s.txs = [];
-          s.txs.unshift({
-            id: uid(), type: "rejected", amount: null,
-            note: (r.type === "deposit" ? "Deposit" : "Withdrawal") + " request of " + fmtUSDT(amount) + " was rejected · Main Balance unchanged",
-            time: Date.now()
-          });
-          if (s.txs.length > 120) s.txs.length = 120;
-          saveState(acct.username, s);
-          toast("Request rejected", label + "'s " + (r.type === "deposit" ? "deposit" : "withdrawal") +
-            " of " + fmtUSDT(amount) + " was rejected. Balance unchanged.");
-        }
-        renderAll();
+            // Approve: move the money in the user's wallet first.
+            return sb.from("tn_wallets").select("*").eq("user_id", r.user_id).maybeSingle()
+              .then(function(wres){
+                var w = wres.data;
+                var bal = w ? Number(w.main_balance) || 0 : 0;
+                if (r.type === "withdrawal" && amount > bal){
+                  toast("Cannot approve withdrawal",
+                    label + "'s Main Balance is " + fmtUSD(bal) + " — not enough for a " + fmtUSDT(amount) + " withdrawal.", "err");
+                  return null;
+                }
+                var newBal = round2(r.type === "deposit" ? bal + amount : bal - amount);
+                var up = w
+                  ? sb.from("tn_wallets").update({ main_balance: newBal, updated_at: nowISO }).eq("user_id", r.user_id)
+                  : sb.from("tn_wallets").insert({ user_id: r.user_id, main_balance: newBal });
+                return up.then(function(ures){
+                  if (ures.error) throw ures.error;
+                  return sb.from("tn_requests")
+                    .update({ status: "approved", decided_at: nowISO }).eq("id", id)
+                    .then(function(rures){
+                      if (rures.error) throw rures.error;
+                      var msg = label + "'s " + (r.type === "deposit" ? "deposit" : "withdrawal") + " of " +
+                        fmtUSDT(amount) + " applied to Main Balance. New balance: " + fmtUSD(newBal) + ".";
+                      if (r.type === "deposit"){
+                        return maybeReferralReward(r.user_id).then(function(referrerName){
+                          if (referrerName) msg += " Referral reward of 3 USDT credited to " + referrerName + ".";
+                          toast("Request approved", msg);
+                        });
+                      }
+                      toast("Request approved", msg);
+                    });
+                });
+              });
+          })
+          .catch(function(err){
+            if (window.console) console.warn("TrybNetwork admin: request action failed", err);
+            toast("Action failed", "The shared demo database did not accept that change. The panel has been refreshed.", "err");
+          })
+          .then(function(){ actionBusy = false; refresh(); });
       }
 
       /* ---------------- bid results ---------------- */
-      // Closing a bid here mirrors the user app's own resolution: the bid
-      // leaves openTrades and lands in trades[] with result won/lost, so
-      // the user's trade history updates on their next view. A win credits
-      // Main Balance with the stake back plus the 85% payout; a loss takes
-      // nothing further — the stake was locked when the bid was placed.
-      function resolveBid(username, id, outcome){
-        var snap = loadSnapshot();
-        var acct = findAccount(snap.accounts, username);
-        var s = acct ? snap.states[acct.username] : null;
-        if (!acct || !s || !Array.isArray(s.openTrades)){
-          toast("Could not load that account", "The shared demo data may have changed. The panel has been refreshed.", "err");
-          renderAll();
-          return;
-        }
-        var idx = -1, bid = null;
-        s.openTrades.forEach(function(t, i){ if (t && t.id === id){ idx = i; bid = t; } });
-        if (!bid){ renderAll(); return; }
-        var won = outcome === "win";
-        var stake = Number(bid.stake) || 0;
-        var pnl = won ? stake * BID_PAYOUT_RATE : -stake;
-        s.openTrades.splice(idx, 1);
-        if (won) s.main = (typeof s.main === "number" ? s.main : 0) + stake * (1 + BID_PAYOUT_RATE);
-        if (!Array.isArray(s.trades)) s.trades = [];
-        s.trades.unshift({
-          id: bid.id, asset: bid.asset, dir: bid.dir, stake: stake,
-          entry: bid.entry, exit: bid.entry, result: won ? "won" : "lost",
-          pnl: pnl, openedAt: bid.openedAt, closedAt: Date.now()
-        });
-        if (s.trades.length > 100) s.trades.length = 100;
-        // Same side effects as the user app's own trade resolution: the
-        // stake counts toward the welcome-bonus traded volume, and the
-        // martingale step advances on a loss / resets on a win.
-        if (s.bonusLocked){
-          s.bonusTraded = (typeof s.bonusTraded === "number" ? s.bonusTraded : 0) + stake;
-          if (s.bonusTraded >= BID_BONUS_UNLOCK_VOLUME) s.bonusLocked = false;
-        }
-        if (s.mgOn) s.mgStep = won ? 0 : (typeof s.mgStep === "number" ? s.mgStep : 0) + 1;
-        saveState(acct.username, s);
-        var label = acct.name || acct.username;
-        var dirLabel = bid.dir === "higher" ? "High" : "Low";
-        if (won){
-          toast("Bid marked Won",
-            label + "'s " + fmtUSD(stake) + " " + dirLabel + " bid on " + bid.asset + " paid " +
-            fmtUSD(stake * (1 + BID_PAYOUT_RATE)) + " to Main Balance. New balance: " + fmtUSD(s.main) + ".");
-        } else {
-          toast("Bid marked Lost",
-            label + "'s " + fmtUSD(stake) + " " + dirLabel + " bid on " + bid.asset +
-            " lost — stake forfeited, Main Balance unchanged at " + fmtUSD(s.main) + ".");
-        }
-        renderAll();
+      // Mark Win credits the user's Main Balance with the stake back plus
+      // the 85% payout (stake × 1.85 total) and records payout = stake ×
+      // 0.85 on the bid. Mark Lose takes nothing further — the stake was
+      // already locked when the bid was placed.
+      function resolveBid(userId, id, outcome){
+        if (actionBusy) return;
+        if (!sb){ backendDown(); return; }
+        actionBusy = true;
+        sb.from("tn_bids").select("*").eq("id", id).maybeSingle()
+          .then(function(res){
+            var bid = res.data;
+            if (!bid || bid.status !== "pending"){ actionBusy = false; refresh(); return; }
+            var prof = profileById[bid.user_id];
+            var label = prof ? (prof.full_name || prof.username) : "That user";
+            var won = outcome === "win";
+            var stake = Number(bid.stake) || 0;
+            var nowISO = new Date().toISOString();
+            var dirLabel = bid.direction === "high" ? "High" : "Low";
+
+            if (!won){
+              return sb.from("tn_bids")
+                .update({ status: "lost", decided_at: nowISO }).eq("id", id)
+                .then(function(ures){
+                  if (ures.error) throw ures.error;
+                  var w = walletOf(bid.user_id);
+                  toast("Bid marked Lost",
+                    label + "'s " + fmtUSD(stake) + " " + dirLabel + " bid on " + bid.asset +
+                    " lost — stake forfeited, Main Balance unchanged at " + fmtUSD(w.main_balance) + ".");
+                });
+            }
+            return sb.from("tn_wallets").select("*").eq("user_id", bid.user_id).maybeSingle()
+              .then(function(wres){
+                var w = wres.data;
+                var bal = w ? Number(w.main_balance) || 0 : 0;
+                var credit = round2(stake * (1 + BID_PAYOUT_RATE));
+                var newBal = round2(bal + credit);
+                var up = w
+                  ? sb.from("tn_wallets").update({ main_balance: newBal, updated_at: nowISO }).eq("user_id", bid.user_id)
+                  : sb.from("tn_wallets").insert({ user_id: bid.user_id, main_balance: newBal });
+                return up.then(function(ures){
+                  if (ures.error) throw ures.error;
+                  return sb.from("tn_bids")
+                    .update({ status: "won", payout: round2(stake * BID_PAYOUT_RATE), decided_at: nowISO }).eq("id", id)
+                    .then(function(bres){
+                      if (bres.error) throw bres.error;
+                      toast("Bid marked Won",
+                        label + "'s " + fmtUSD(stake) + " " + dirLabel + " bid on " + bid.asset + " paid " +
+                        fmtUSD(credit) + " to Main Balance. New balance: " + fmtUSD(newBal) + ".");
+                    });
+                });
+              });
+          })
+          .catch(function(err){
+            if (window.console) console.warn("TrybNetwork admin: bid action failed", err);
+            toast("Action failed", "The shared demo database did not accept that change. The panel has been refreshed.", "err");
+          })
+          .then(function(){ actionBusy = false; refresh(); });
       }
 
       /* ---------------- sentiment ---------------- */
       var ASSET_NAMES = { BTCUSD: "Bitcoin / USD", ETHUSD: "Ethereum / USD", EURUSD: "Euro / USD", XAUUSD: "Gold / USD" };
-      // Simulated sample counts, used only when no demo trade data exists
-      // yet — the same baseline the user app seeds its sentiment with.
+      // Simulated sample counts, used only when no demo bids exist yet —
+      // the same baseline the user app seeds its sentiment with.
       var SIM_SENTIMENT = {
         BTCUSD: { long: 1284, short: 862 },
         ETHUSD: { long: 942,  short: 733 },
         EURUSD: { long: 618,  short: 589 },
         XAUUSD: { long: 1105, short: 474 }
       };
-      function collectSentiment(snap){
-        var counts = {}, tradesFound = 0;
+      function collectSentiment(){
+        var counts = {}, bidsFound = 0;
         Object.keys(ASSET_NAMES).forEach(function(sym){ counts[sym] = { long: 0, short: 0 }; });
-        function scan(state){
-          if (!state) return;
-          ["trades", "openTrades"].forEach(function(field){
-            var arr = state[field];
-            if (!Array.isArray(arr)) return;
-            arr.forEach(function(t){
-              if (!t || !counts[t.asset]) return;
-              // User app positions: "higher" = Long, "lower" = Short.
-              if (t.dir === "higher"){ counts[t.asset].long++; tradesFound++; }
-              else if (t.dir === "lower"){ counts[t.asset].short++; tradesFound++; }
-            });
-          });
-        }
-        snap.accounts.forEach(function(a){ scan(snap.states[a.username]); });
-        if (!snap.accounts.length) scan(snap.legacy);
-        return { counts: counts, tradesFound: tradesFound };
+        DB.bids.forEach(function(b){
+          if (!b || !b.asset) return;
+          if (!counts[b.asset]) counts[b.asset] = { long: 0, short: 0 };
+          // Bid directions: "high" = Long, "low" = Short (all statuses).
+          if (b.direction === "high"){ counts[b.asset].long++; bidsFound++; }
+          else if (b.direction === "low"){ counts[b.asset].short++; bidsFound++; }
+        });
+        return { counts: counts, bidsFound: bidsFound };
       }
 
       /* ---------------- rendering ---------------- */
-      function renderStats(snap, reqs){
+      function renderStats(){
         var totalMain = 0, totalSavings = 0;
-        snap.accounts.forEach(function(a){
-          var s = snap.states[a.username];
-          if (s){ totalMain += s.main || 0; totalSavings += s.savings || 0; }
+        DB.profiles.forEach(function(p){
+          totalMain += Number(walletOf(p.id).main_balance) || 0;
+          totalSavings += savingsOf(p.id);
         });
-        $("statUsers").textContent = snap.accounts.length;
-        $("statPending").textContent = reqs.filter(function(x){ return x.req.status === "pending"; }).length;
+        $("statUsers").textContent = DB.profiles.length;
+        $("statPending").textContent = DB.requests.filter(function(r){ return r.status === "pending"; }).length;
         $("statMain").textContent = fmtUSD(totalMain);
         $("statSavings").textContent = fmtUSD(totalSavings);
       }
-      function renderUsers(snap){
+      function resolveReferrer(p){
+        if (!p.referred_by) return null;
+        for (var i = 0; i < DB.profiles.length; i++){
+          var pr = DB.profiles[i];
+          if (pr.id === p.referred_by || (pr.referral_code && pr.referral_code === p.referred_by)) return pr;
+        }
+        return null;
+      }
+      function renderUsers(){
         var box = $("userList");
-        if (!snap.accounts.length){
+        if (!DB.profiles.length){
           box.innerHTML = '<div class="empty"><b>No registered users yet</b>' +
-            "Accounts created in the TrybNetwork Trade &amp; Save app on this device will appear here automatically.</div>";
+            "Accounts created in the TrybNetwork Trade &amp; Save app will appear here automatically.</div>";
           return;
         }
-        box.innerHTML = snap.accounts.map(function(a){
-          var s = snap.states[a.username];
-          var pend = 0;
-          if (s && Array.isArray(s.adminRequests)){
-            pend = s.adminRequests.filter(function(r){ return r && r.self && r.status === "pending"; }).length;
-          }
-          var referrer = a.referredBy ? findAccount(snap.accounts, a.referredBy) : null;
+        box.innerHTML = DB.profiles.map(function(p){
+          var w = walletOf(p.id);
+          var pend = DB.requests.filter(function(r){ return r.user_id === p.id && r.status === "pending"; }).length;
+          var referrer = resolveReferrer(p);
           return '<div class="user-row">' +
-            '<span class="avatar">' + esc(avatarInitials(a.name || a.username)) + "</span>" +
-            '<div class="u-main"><div class="u-name">' + esc(a.name || a.username) +
+            '<span class="avatar">' + esc(avatarInitials(p.full_name || p.username)) + "</span>" +
+            '<div class="u-main"><div class="u-name">' + esc(p.full_name || p.username) +
               (pend ? '<span class="pend-tag">' + pend + " pending</span>" : "") + "</div>" +
-              '<div class="u-sub">@' + esc(a.username) + (a.email ? " · " + esc(a.email) : "") +
-              "<br>Joined " + fmtTime(a.createdAt) +
-              (a.refCode ? " · Code " + esc(a.refCode) : "") +
-              (referrer ? "<br>Referred by " + esc(referrer.name || referrer.username) : "") +
+              '<div class="u-sub">@' + esc(p.username) + (p.email ? " · " + esc(p.email) : "") +
+              "<br>Joined " + fmtTime(p.created_at) +
+              (p.referral_code ? " · Code " + esc(p.referral_code) : "") +
+              (p.referred_by ? "<br>Referred by " + esc(referrer ? (referrer.full_name || referrer.username) : p.referred_by) : "") +
               "</div></div>" +
-            '<div class="u-bal"><div class="b num">' + (s ? fmtUSD(s.main || 0) : "—") + '</div><div class="k">Main</div></div>' +
-            '<div class="u-bal"><div class="b num">' + (s ? fmtUSD(s.savings || 0) : "—") + '</div><div class="k">Savings</div></div>' +
+            '<div class="u-bal"><div class="b num">' + fmtUSD(w.main_balance) + '</div><div class="k">Main</div></div>' +
+            '<div class="u-bal"><div class="b num">' + fmtUSD(savingsOf(p.id)) + '</div><div class="k">Savings</div></div>' +
             "</div>";
         }).join("");
       }
-      function requestRow(x){
-        var r = x.req, a = x.acct;
+      function requestRow(r){
+        var p = profileById[r.user_id] || {};
         var isDep = r.type === "deposit";
         var statusTag = r.status === "pending" ? '<span class="req-status">Pending</span>'
           : '<span class="req-status ' + esc(r.status) + '">' + (r.status === "approved" ? "Approved" : "Rejected") + "</span>";
         var btns = r.status === "pending"
           ? '<div class="req-btns">' +
-              '<button class="btn-approve" type="button" data-act="approve" data-user="' + esc(a.username) + '" data-id="' + esc(r.id) + '">Approve</button>' +
-              '<button class="btn-reject" type="button" data-act="reject" data-user="' + esc(a.username) + '" data-id="' + esc(r.id) + '">Reject</button>' +
+              '<button class="btn-approve" type="button" data-act="approve" data-user="' + esc(r.user_id) + '" data-id="' + esc(r.id) + '">Approve</button>' +
+              '<button class="btn-reject" type="button" data-act="reject" data-user="' + esc(r.user_id) + '" data-id="' + esc(r.id) + '">Reject</button>' +
             "</div>"
           : "";
         return '<div class="req-item"><div class="req-top">' +
-          '<span class="req-user">' + esc(a.name || a.username) + ' <span class="at">@' + esc(a.username) + "</span></span>" +
+          '<span class="req-user">' + esc(p.full_name || p.username || "Unknown user") + ' <span class="at">@' + esc(p.username || "") + "</span></span>" +
           '<span class="req-type ' + (isDep ? "deposit" : "withdraw") + '">' + (isDep ? "Deposit" : "Withdrawal") + "</span>" +
           statusTag + "</div>" +
           '<div class="req-amt num">' + fmtUSDT(r.amount) + ' <small>· ' + (isDep ? "into" : "out of") + " Main Balance</small></div>" +
-          '<div class="req-meta">Requested ' + fmtTime(r.time) +
-          (r.status !== "pending" && typeof r.balanceAfter === "number"
-            ? " · Main Balance after: <b>" + fmtUSD(r.balanceAfter) + "</b>" : "") +
+          '<div class="req-meta">Requested ' + fmtTime(r.created_at) +
+          (r.status !== "pending" && r.decided_at ? " · Decided " + fmtTime(r.decided_at) : "") +
           "</div>" + btns + "</div>";
       }
-      function renderRequests(snap, reqs){
+      function renderRequests(){
         var box = $("reqList");
-        if (!snap.accounts.length){
+        if (!DB.profiles.length){
           box.innerHTML = '<div class="empty"><b>No requests yet</b>' +
             "Deposit and withdrawal requests from registered users will appear here for approval.</div>";
           return;
         }
-        var pend = reqs.filter(function(x){ return x.req.status === "pending"; });
-        var done = reqs.filter(function(x){ return x.req.status !== "pending"; });
+        var pend = DB.requests.filter(function(r){ return r.status === "pending"; });
+        var done = DB.requests.filter(function(r){ return r.status !== "pending"; });
         var html = "";
         if (pend.length) html += pend.map(requestRow).join("");
         else html += '<div class="empty">No pending requests right now.</div>';
@@ -893,27 +834,26 @@
         }
         box.innerHTML = html;
       }
-      function bidRow(x){
-        var t = x.bid, a = x.acct;
-        var high = t.dir === "higher";
-        var stake = Number(t.stake) || 0;
+      function bidRow(b){
+        var p = profileById[b.user_id] || {};
+        var high = b.direction === "high";
+        var stake = Number(b.stake) || 0;
         return '<div class="req-item"><div class="req-top">' +
-          '<span class="req-user">' + esc(a.name || a.username) + ' <span class="at">@' + esc(a.username) + "</span></span>" +
+          '<span class="req-user">' + esc(p.full_name || p.username || "Unknown user") + ' <span class="at">@' + esc(p.username || "") + "</span></span>" +
           '<span class="req-type ' + (high ? "high" : "low") + '">' + (high ? "High" : "Low") + "</span>" +
           '<span class="req-status">Pending</span></div>' +
-          '<div class="req-amt num">' + fmtUSD(stake) + ' <small>stake · ' + esc(t.asset || "") + "</small></div>" +
-          '<div class="req-meta">Placed ' + fmtTime(t.openedAt) +
-          (typeof t.entry === "number" && isFinite(t.entry)
-            ? " · Entry " + t.entry.toLocaleString("en-US", { maximumFractionDigits: 4 }) : "") +
-          " · Mark Win pays " + fmtUSD(stake * (1 + BID_PAYOUT_RATE)) + " to Main Balance</div>" +
+          '<div class="req-amt num">' + fmtUSD(stake) + ' <small>stake · ' + esc(b.asset || "") + "</small></div>" +
+          '<div class="req-meta">Placed ' + fmtTime(b.created_at) +
+          " · Mark Win pays " + fmtUSD(round2(stake * (1 + BID_PAYOUT_RATE))) + " to Main Balance</div>" +
           '<div class="req-btns">' +
-            '<button class="btn-approve" type="button" data-bid="win" data-user="' + esc(a.username) + '" data-id="' + esc(t.id) + '">Mark Win</button>' +
-            '<button class="btn-reject" type="button" data-bid="lose" data-user="' + esc(a.username) + '" data-id="' + esc(t.id) + '">Mark Lose</button>' +
+            '<button class="btn-approve" type="button" data-bid="win" data-user="' + esc(b.user_id) + '" data-id="' + esc(b.id) + '">Mark Win</button>' +
+            '<button class="btn-reject" type="button" data-bid="lose" data-user="' + esc(b.user_id) + '" data-id="' + esc(b.id) + '">Mark Lose</button>' +
           "</div></div>";
       }
-      function renderBids(snap, bids){
+      function renderBids(){
         var box = $("bidList");
-        if (!snap.accounts.length){
+        var bids = DB.bids.filter(function(b){ return b.status === "pending"; });
+        if (!DB.profiles.length){
           box.innerHTML = '<div class="empty"><b>No pending bids</b>' +
             "High / Low bids placed by registered users in the Trade &amp; Save app will appear here for a result.</div>";
           return;
@@ -924,34 +864,31 @@
         }
         box.innerHTML = bids.map(bidRow).join("");
       }
-      function renderSentiment(snap){
-        var data = collectSentiment(snap);
-        var live = data.tradesFound > 0;
+      function renderSentiment(){
+        var data = collectSentiment();
+        var live = data.bidsFound > 0;
         var counts = live ? data.counts : SIM_SENTIMENT;
-        $("sentimentList").innerHTML = Object.keys(ASSET_NAMES).map(function(sym){
+        $("sentimentList").innerHTML = Object.keys(counts).map(function(sym){
           var c = counts[sym], total = c.long + c.short;
           var lp = total ? Math.round(c.long / total * 100) : 50;
           var leadLong = c.long >= c.short;
           return '<div class="sent-row"><div class="sent-head">' +
-            '<span class="sent-sym">' + sym + "<small>" + ASSET_NAMES[sym] + "</small></span>" +
+            '<span class="sent-sym">' + esc(sym) + "<small>" + esc(ASSET_NAMES[sym] || "") + "</small></span>" +
             '<span class="sent-lead ' + (leadLong ? "long" : "short") + '">' + (leadLong ? "Long " + lp : "Short " + (100 - lp)) + "%</span></div>" +
             '<div class="sent-bar"><div class="long-fill" style="width:' + lp + '%"></div></div>' +
             '<div class="sent-labels"><span class="l num">Long · ' + c.long.toLocaleString("en-US") + " (" + lp + '%)</span>' +
             '<span class="s num">Short · ' + c.short.toLocaleString("en-US") + " (" + (100 - lp) + "%)</span></div></div>";
         }).join("");
         $("sentimentSource").textContent = live
-          ? "Live from demo trade activity — " + data.tradesFound + " trade" + (data.tradesFound === 1 ? "" : "s") + " placed in the Trade & Save app."
+          ? "Live from demo trade activity — " + data.bidsFound + " bid" + (data.bidsFound === 1 ? "" : "s") + " placed in the Trade & Save app."
           : "Simulated sample data — no demo trades have been placed yet, so these counts are illustrative only.";
       }
       function renderAll(){
-        var snap = loadSnapshot();
-        var reqs = userRequests(snap);
-        var bids = userBids(snap);
-        renderStats(snap, reqs);
-        renderRequests(snap, reqs);
-        renderBids(snap, bids);
-        renderUsers(snap);
-        renderSentiment(snap);
+        renderStats();
+        renderRequests();
+        renderBids();
+        renderUsers();
+        renderSentiment();
       }
 
       /* ---------------- PIN gate ---------------- */
@@ -979,6 +916,8 @@
         $("panelRoot").hidden = false;
         renderAll();
         toast("Welcome, Admin", "You can now manage requests and watch Long vs Short sentiment.");
+        refresh().then(function(ok){ if (!ok && !sb) backendDown(); });
+        startRealtime();
       }
       function lock(){
         unlocked = false;
@@ -1023,8 +962,9 @@
         resolveBid(btn.getAttribute("data-user"), btn.getAttribute("data-id"), btn.getAttribute("data-bid"));
       });
       $("refreshBtn").addEventListener("click", function(){
-        renderAll();
-        toast("Data refreshed", "Balances, requests, and sentiment now match the shared demo data.");
+        refresh().then(function(){
+          toast("Data refreshed", "Balances, requests, and sentiment now match the shared demo data.");
+        });
       });
       $("lockBtn").addEventListener("click", lock);
 
@@ -1046,33 +986,49 @@
         resetArmed = false;
         btn.classList.remove("confirm");
         btn.textContent = "Reset demo data";
-        // Remove every key that belongs to the shared demo: the known keys
-        // plus anything discovered during this session.
-        var doomed = {};
-        [keys.accounts, keys.session, keys.legacy].forEach(function(k){ if (k) doomed[k] = true; });
-        Object.keys(keys.stateByUser).forEach(function(u){ doomed[keys.stateByUser[u]] = true; });
-        lsKeys().forEach(function(k){
-          if (k.indexOf(KNOWN.statePrefix) === 0 || k === KNOWN.accounts ||
-              k === KNOWN.session || k === KNOWN.legacy) doomed[k] = true;
+        if (!sb){ backendDown(); return; }
+        // Wipe the shared demo tables in dependency order; auth.users
+        // rows are left alone.
+        var wipe = [
+          ["tn_bids", "id"], ["tn_requests", "id"], ["tn_savings_lots", "id"],
+          ["tn_referrals", "id"], ["tn_wallets", "user_id"], ["tn_profiles", "id"]
+        ];
+        var chain = Promise.resolve();
+        wipe.forEach(function(pair){
+          chain = chain.then(function(){
+            return sb.from(pair[0]).delete().not(pair[1], "is", null).then(function(res){
+              if (res.error) throw res.error;
+            });
+          });
         });
-        Object.keys(doomed).forEach(lsRemove);
-        keys.stateByUser = {};
-        keys.accounts = KNOWN.accounts; keys.session = KNOWN.session;
-        keys.legacy = KNOWN.legacy; keys.statePrefix = KNOWN.statePrefix;
-        renderAll();
-        toast("Demo reset", "All shared demo data has been cleared on this device.");
+        chain.then(function(){
+          toast("Demo reset", "All shared demo data has been cleared from the backend.");
+        }).catch(function(err){
+          if (window.console) console.warn("TrybNetwork admin: reset failed", err);
+          toast("Reset failed", "The shared demo database did not accept the reset. The panel has been refreshed.", "err");
+        }).then(function(){ refresh(); });
       });
 
-      /* ---------------- live sync with the user app ---------------- */
-      // The user app writes to the same keys; a storage event means another
-      // tab changed the shared data, so re-render to stay live.
-      window.addEventListener("storage", function(e){
-        if (!unlocked) return;
-        if (!e.key || e.key.indexOf("trybnetwork") === 0) renderAll();
-      });
+      /* ---------------- live sync ---------------- */
+      // Realtime subscriptions push changes from any device; a 15-second
+      // polling refetch covers a dropped socket.
+      var realtimeStarted = false;
+      function startRealtime(){
+        if (!sb || realtimeStarted) return;
+        realtimeStarted = true;
+        ["tn_requests", "tn_bids", "tn_wallets"].forEach(function(t){
+          try {
+            sb.channel("tn-admin-" + t)
+              .on("postgres_changes", { event: "*", schema: "public", table: t }, function(){ refresh(); })
+              .subscribe();
+          } catch(e){ /* polling fallback still applies */ }
+        });
+      }
+      setInterval(function(){ if (unlocked) refresh(); }, 15000);
       document.addEventListener("visibilitychange", function(){
-        if (unlocked && !document.hidden) renderAll();
+        if (unlocked && !document.hidden) refresh();
       });
+
     </script>
   </body>
 </html>
