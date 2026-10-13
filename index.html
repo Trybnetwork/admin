@@ -205,6 +205,12 @@
       .req-type.withdraw{ background:var(--red-bg); color:var(--red); }
       .req-type.high{ background:var(--green-bg); color:var(--green); }
       .req-type.low{ background:var(--red-bg); color:var(--red); }
+      .req-method{
+        font-size:10.5px; font-weight:700; letter-spacing:.4px;
+        padding:3px 8px; border-radius:999px;
+        background:rgba(201,162,75,.14); color:var(--gold-bright);
+        border:1px solid rgba(201,162,75,.35);
+      }
       .req-status{
         font-size:10.5px; font-weight:800; letter-spacing:.6px; text-transform:uppercase;
         padding:3px 8px; border-radius:999px; margin-left:auto;
@@ -448,7 +454,7 @@
            tn_wallets       user_id, main_balance, savings_interest,
                             traded_volume, bonus_locked, updated_at
            tn_savings_lots  id, user_id, amount, unlock_at, created_at
-           tn_requests      id, user_id, type, amount, status,
+           tn_requests      id, user_id, type, amount, status, method,
                             created_at, decided_at
            tn_bids          id, user_id, asset, direction, stake, status,
                             payout, created_at, decided_at
@@ -800,6 +806,11 @@
       function requestRow(r){
         var p = profileById[r.user_id] || {};
         var isDep = r.type === "deposit";
+        var methodTag = "";
+        if (isDep){
+          if (r.method === "bank") methodTag = '<span class="req-method">Bank Transfer</span>';
+          else if (r.method === "crypto") methodTag = '<span class="req-method">Crypto</span>';
+        }
         var statusTag = r.status === "pending" ? '<span class="req-status">Pending</span>'
           : '<span class="req-status ' + esc(r.status) + '">' + (r.status === "approved" ? "Approved" : "Rejected") + "</span>";
         var btns = r.status === "pending"
@@ -811,6 +822,7 @@
         return '<div class="req-item"><div class="req-top">' +
           '<span class="req-user">' + esc(p.full_name || p.username || "Unknown user") + ' <span class="at">@' + esc(p.username || "") + "</span></span>" +
           '<span class="req-type ' + (isDep ? "deposit" : "withdraw") + '">' + (isDep ? "Deposit" : "Withdrawal") + "</span>" +
+          methodTag +
           statusTag + "</div>" +
           '<div class="req-amt num">' + fmtUSDT(r.amount) + ' <small>· ' + (isDep ? "into" : "out of") + " Main Balance</small></div>" +
           '<div class="req-meta">Requested ' + fmtTime(r.created_at) +
