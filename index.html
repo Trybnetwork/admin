@@ -203,6 +203,8 @@
       }
       .req-type.deposit{ background:var(--green-bg); color:var(--green); }
       .req-type.withdraw{ background:var(--red-bg); color:var(--red); }
+      .req-type.high{ background:var(--green-bg); color:var(--green); }
+      .req-type.low{ background:var(--red-bg); color:var(--red); }
       .req-status{
         font-size:10.5px; font-weight:800; letter-spacing:.6px; text-transform:uppercase;
         padding:3px 8px; border-radius:999px; margin-left:auto;
@@ -397,6 +399,12 @@
           <div id="reqList"></div>
         </section>
 
+        <section class="panel" aria-label="Pending bids">
+          <h2>Pending Bids</h2>
+          <p class="sec-sub">Open High / Low bids placed in the Trade &amp; Save app, waiting on a result. Mark Win pays the stake back plus an 85% payout to that user's Main Balance; Mark Lose closes the bid with the stake forfeited — it was already locked when the bid was placed. All amounts are virtual.</p>
+          <div id="bidList"></div>
+        </section>
+
         <section class="panel" aria-label="Registered users">
           <h2>Registered Users</h2>
           <p class="sec-sub">Every demo account from the Trade &amp; Save app, with live virtual balances.</p>
@@ -446,6 +454,8 @@
       var WELCOME_BONUS = 3;        // mirrors the user app: locked until traded
       var REFERRAL_REWARD = 3;      // USDT credited to the referrer
       var REFERRAL_DEPOSIT = 12;    // first deposit of this size triggers it
+      var BID_PAYOUT_RATE = 0.85;   // mirrors the user app: 85% profit on a won bid
+      var BID_BONUS_UNLOCK_VOLUME = 10; // mirrors the user app's bonus holdback
 
       var KNOWN = {
         accounts: "trybnetwork-accounts-v1",
@@ -607,6 +617,21 @@
         out.sort(function(x, y){ return (y.req.time || 0) - (x.req.time || 0); });
         return out;
       }
+      function userBids(snap){
+        // Pending High/Low bids are the user app's openTrades: the stake
+        // was already deducted from Main Balance when the bid was placed,
+        // and the bid sits there until a result closes it into trades[].
+        var out = [];
+        snap.accounts.forEach(function(a){
+          var s = snap.states[a.username];
+          if (!s || !Array.isArray(s.openTrades)) return;
+          s.openTrades.forEach(function(t){
+            if (t && t.id) out.push({ acct: a, bid: t });
+          });
+        });
+        out.sort(function(x, y){ return (y.bid.openedAt || 0) - (x.bid.openedAt || 0); });
+        return out;
+      }
 
       /* ---------------- referral reward ---------------- */
       // Mirrors the user app: when a referred user's first deposit of
@@ -702,6 +727,59 @@
           saveState(acct.username, s);
           toast("Request rejected", label + "'s " + (r.type === "deposit" ? "deposit" : "withdrawal") +
             " of " + fmtUSDT(amount) + " was rejected. Balance unchanged.");
+        }
+        renderAll();
+      }
+
+      /* ---------------- bid results ---------------- */
+      // Closing a bid here mirrors the user app's own resolution: the bid
+      // leaves openTrades and lands in trades[] with result won/lost, so
+      // the user's trade history updates on their next view. A win credits
+      // Main Balance with the stake back plus the 85% payout; a loss takes
+      // nothing further — the stake was locked when the bid was placed.
+      function resolveBid(username, id, outcome){
+        var snap = loadSnapshot();
+        var acct = findAccount(snap.accounts, username);
+        var s = acct ? snap.states[acct.username] : null;
+        if (!acct || !s || !Array.isArray(s.openTrades)){
+          toast("Could not load that account", "The shared demo data may have changed. The panel has been refreshed.", "err");
+          renderAll();
+          return;
+        }
+        var idx = -1, bid = null;
+        s.openTrades.forEach(function(t, i){ if (t && t.id === id){ idx = i; bid = t; } });
+        if (!bid){ renderAll(); return; }
+        var won = outcome === "win";
+        var stake = Number(bid.stake) || 0;
+        var pnl = won ? stake * BID_PAYOUT_RATE : -stake;
+        s.openTrades.splice(idx, 1);
+        if (won) s.main = (typeof s.main === "number" ? s.main : 0) + stake * (1 + BID_PAYOUT_RATE);
+        if (!Array.isArray(s.trades)) s.trades = [];
+        s.trades.unshift({
+          id: bid.id, asset: bid.asset, dir: bid.dir, stake: stake,
+          entry: bid.entry, exit: bid.entry, result: won ? "won" : "lost",
+          pnl: pnl, openedAt: bid.openedAt, closedAt: Date.now()
+        });
+        if (s.trades.length > 100) s.trades.length = 100;
+        // Same side effects as the user app's own trade resolution: the
+        // stake counts toward the welcome-bonus traded volume, and the
+        // martingale step advances on a loss / resets on a win.
+        if (s.bonusLocked){
+          s.bonusTraded = (typeof s.bonusTraded === "number" ? s.bonusTraded : 0) + stake;
+          if (s.bonusTraded >= BID_BONUS_UNLOCK_VOLUME) s.bonusLocked = false;
+        }
+        if (s.mgOn) s.mgStep = won ? 0 : (typeof s.mgStep === "number" ? s.mgStep : 0) + 1;
+        saveState(acct.username, s);
+        var label = acct.name || acct.username;
+        var dirLabel = bid.dir === "higher" ? "High" : "Low";
+        if (won){
+          toast("Bid marked Won",
+            label + "'s " + fmtUSD(stake) + " " + dirLabel + " bid on " + bid.asset + " paid " +
+            fmtUSD(stake * (1 + BID_PAYOUT_RATE)) + " to Main Balance. New balance: " + fmtUSD(s.main) + ".");
+        } else {
+          toast("Bid marked Lost",
+            label + "'s " + fmtUSD(stake) + " " + dirLabel + " bid on " + bid.asset +
+            " lost — stake forfeited, Main Balance unchanged at " + fmtUSD(s.main) + ".");
         }
         renderAll();
       }
@@ -815,6 +893,37 @@
         }
         box.innerHTML = html;
       }
+      function bidRow(x){
+        var t = x.bid, a = x.acct;
+        var high = t.dir === "higher";
+        var stake = Number(t.stake) || 0;
+        return '<div class="req-item"><div class="req-top">' +
+          '<span class="req-user">' + esc(a.name || a.username) + ' <span class="at">@' + esc(a.username) + "</span></span>" +
+          '<span class="req-type ' + (high ? "high" : "low") + '">' + (high ? "High" : "Low") + "</span>" +
+          '<span class="req-status">Pending</span></div>' +
+          '<div class="req-amt num">' + fmtUSD(stake) + ' <small>stake · ' + esc(t.asset || "") + "</small></div>" +
+          '<div class="req-meta">Placed ' + fmtTime(t.openedAt) +
+          (typeof t.entry === "number" && isFinite(t.entry)
+            ? " · Entry " + t.entry.toLocaleString("en-US", { maximumFractionDigits: 4 }) : "") +
+          " · Mark Win pays " + fmtUSD(stake * (1 + BID_PAYOUT_RATE)) + " to Main Balance</div>" +
+          '<div class="req-btns">' +
+            '<button class="btn-approve" type="button" data-bid="win" data-user="' + esc(a.username) + '" data-id="' + esc(t.id) + '">Mark Win</button>' +
+            '<button class="btn-reject" type="button" data-bid="lose" data-user="' + esc(a.username) + '" data-id="' + esc(t.id) + '">Mark Lose</button>' +
+          "</div></div>";
+      }
+      function renderBids(snap, bids){
+        var box = $("bidList");
+        if (!snap.accounts.length){
+          box.innerHTML = '<div class="empty"><b>No pending bids</b>' +
+            "High / Low bids placed by registered users in the Trade &amp; Save app will appear here for a result.</div>";
+          return;
+        }
+        if (!bids.length){
+          box.innerHTML = '<div class="empty">No pending bids right now.</div>';
+          return;
+        }
+        box.innerHTML = bids.map(bidRow).join("");
+      }
       function renderSentiment(snap){
         var data = collectSentiment(snap);
         var live = data.tradesFound > 0;
@@ -837,8 +946,10 @@
       function renderAll(){
         var snap = loadSnapshot();
         var reqs = userRequests(snap);
+        var bids = userBids(snap);
         renderStats(snap, reqs);
         renderRequests(snap, reqs);
+        renderBids(snap, bids);
         renderUsers(snap);
         renderSentiment(snap);
       }
@@ -905,6 +1016,11 @@
         var btn = e.target.closest("button[data-act]");
         if (!btn) return;
         actOnRequest(btn.getAttribute("data-user"), btn.getAttribute("data-id"), btn.getAttribute("data-act"));
+      });
+      $("bidList").addEventListener("click", function(e){
+        var btn = e.target.closest("button[data-bid]");
+        if (!btn) return;
+        resolveBid(btn.getAttribute("data-user"), btn.getAttribute("data-id"), btn.getAttribute("data-bid"));
       });
       $("refreshBtn").addEventListener("click", function(){
         renderAll();
