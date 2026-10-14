@@ -279,6 +279,35 @@
       .btn-confirm-low{ background:var(--red); color:#2A0D12; }
       .btn-cancel{ background:transparent; color:var(--muted); border:1.5px solid var(--line-soft) !important; }
 
+      /* ---------- Settlement mode toggle ---------- */
+      .settle-mode{
+        display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+        margin:2px 0 12px;
+      }
+      .settle-mode-label{
+        font-size:11.5px; letter-spacing:1.2px; text-transform:uppercase;
+        color:var(--muted); font-weight:800;
+      }
+      .seg{
+        display:inline-flex; border:1.5px solid var(--line); border-radius:999px;
+        overflow:hidden; background:var(--card-2);
+      }
+      .seg button{
+        border:none; background:transparent; color:var(--muted);
+        padding:8px 18px; font-weight:800; font-size:13px; letter-spacing:.3px;
+      }
+      .seg button.active{ background:var(--gold); color:#0B1132; }
+      .auto-note{
+        border:1px solid var(--line); border-radius:12px; background:var(--card-2);
+        padding:11px 13px; font-size:13px; color:var(--gold-bright);
+        margin:0 0 14px; line-height:1.5;
+      }
+      .req-tx{
+        display:inline-block; margin-top:8px; color:var(--gold-bright);
+        font-size:12.5px; font-weight:700; text-decoration:none;
+      }
+      .req-tx:active{ opacity:.75; }
+
       /* ---------- Sentiment ---------- */
       .sent-row{ padding:11px 0; border-bottom:1px solid var(--line-soft); }
       .sent-row:last-child{ border-bottom:none; padding-bottom:2px; }
@@ -459,6 +488,14 @@
         <section class="panel" aria-label="Pending bids">
           <h2>Pending Bids</h2>
           <p class="sec-sub">Open High / Low bids placed in the Trade &amp; Save app, waiting on a result. Settlement is by direction, not per person: Reward HIGH and every pending High bid wins — stake × 1.9 credited to that user's Main Balance (stake back plus a 90% payout) — while every pending Low bid loses its stake, which was already locked when the bid was placed. Reward LOW does the reverse. For each winning bid, the winner's referrer (if any) also gets 1% of the win profit — (stake × 0.9) × 1% — credited to their Main Balance, once per bid. All amounts are virtual.</p>
+          <div class="settle-mode">
+            <span class="settle-mode-label" id="settleModeLabel">Settlement mode</span>
+            <div class="seg" role="group" aria-labelledby="settleModeLabel">
+              <button type="button" id="modeManualBtn" aria-pressed="true">Manual</button>
+              <button type="button" id="modeAutoBtn" aria-pressed="false">Automatic</button>
+            </div>
+          </div>
+          <p class="auto-note" id="autoNote" hidden>Automatic settlement ON — pending bids resolve randomly 5 min after placement (40% win / 60% lose)</p>
           <div id="bidList"></div>
         </section>
 
@@ -520,6 +557,9 @@
                             id, source_type, source_id, referrer_id,
                             referred_id, amount, created_at
                             (unique on source_type + source_id)
+           tn_settings      key, value — panel settings; key
+                            "bid_settlement_mode" is "manual" (default)
+                            or "auto" (random per-bid settlement)
          Realtime subscriptions on tn_requests / tn_bids / tn_wallets /
          tn_miners keep the panel live, with a 15-second polling fallback. All funds are
          virtual — this is a simulation.
@@ -980,6 +1020,147 @@
           .then(function(){ actionBusy = false; refresh(); });
       }
 
+      /* ---------------- settlement mode (manual / automatic) ---------------- */
+      // Persisted in tn_settings under key "bid_settlement_mode" with
+      // value "manual" or "auto". Defaults to "manual" whenever the
+      // table or the row is missing/unreadable.
+      var settlementMode = "manual";
+      function paintModeToggle(){
+        var m = $("modeManualBtn"), a = $("modeAutoBtn"), note = $("autoNote");
+        if (m){
+          m.classList.toggle("active", settlementMode === "manual");
+          m.setAttribute("aria-pressed", settlementMode === "manual" ? "true" : "false");
+        }
+        if (a){
+          a.classList.toggle("active", settlementMode === "auto");
+          a.setAttribute("aria-pressed", settlementMode === "auto" ? "true" : "false");
+        }
+        if (note) note.hidden = settlementMode !== "auto";
+      }
+      function loadSettlementMode(){
+        paintModeToggle();
+        if (!sb) return Promise.resolve();
+        return sb.from("tn_settings").select("value").eq("key", "bid_settlement_mode").maybeSingle()
+          .then(function(res){
+            settlementMode = (!res.error && res.data && res.data.value === "auto") ? "auto" : "manual";
+            paintModeToggle();
+            if (unlocked) renderBids();
+          })
+          .catch(function(){
+            settlementMode = "manual";
+            paintModeToggle();
+          });
+      }
+      function setSettlementMode(mode){
+        if (mode !== "auto" && mode !== "manual") return;
+        if (mode === settlementMode){ paintModeToggle(); return; }
+        settlementMode = mode;
+        rewardConfirm = null;
+        paintModeToggle();
+        renderBids();
+        toast(mode === "auto" ? "Automatic settlement on" : "Manual settlement on",
+          mode === "auto"
+            ? "Pending bids now resolve randomly 5 min after placement (40% win / 60% lose)."
+            : "Use REWARD HIGH / REWARD LOW to settle pending bids.");
+        if (sb){
+          sb.from("tn_settings").upsert({ key: "bid_settlement_mode", value: mode }, { onConflict: "key" })
+            .then(function(res){
+              if (res.error && window.console) console.warn("TrybNetwork admin: settlement mode save failed", res.error);
+            });
+        }
+        if (mode === "auto") autoSettle();
+      }
+
+      /* ---------------- automatic bid settlement ---------------- */
+      // In automatic mode, while this panel is open, a pass runs every
+      // 30 seconds over ALL users' pending bids older than 5 minutes.
+      // Each bid is resolved on its own weighted coin flip:
+      // AUTO_WIN_RATE (40%) win, 60% lose. The writes are exactly the
+      // manual path's: a winner's Main Balance is credited stake × 1.9
+      // and the bid records payout = stake × 0.9; the winner's referrer
+      // gets the 1% profit share through processBidReferralShares; a
+      // loser is simply marked lost. Bids are re-read as still-pending
+      // at the start of each pass and each bid update is filtered on
+      // status = "pending", so a bid settled by anyone else in the
+      // meantime is never settled twice.
+      var AUTO_WIN_RATE = 0.4;
+      var AUTO_SETTLE_AFTER_MS = 5 * 60 * 1000;
+      var autoSettling = false;
+      function autoSettle(){
+        if (autoSettling || !sb || !unlocked || settlementMode !== "auto") return;
+        autoSettling = true;
+        sb.from("tn_bids").select("*").eq("status", "pending")
+          .then(function(res){
+            if (res.error) throw res.error;
+            var cutoff = Date.now() - AUTO_SETTLE_AFTER_MS;
+            var bids = (res.data || []).filter(function(b){
+              var t = new Date(b.created_at || 0).getTime();
+              return !isNaN(t) && t <= cutoff;
+            });
+            if (!bids.length) return null;
+            var nowISO = new Date().toISOString();
+            var wins = 0, losses = 0, totalCredited = 0;
+            var creditByUser = {};
+            var winningBids = [];
+            var outcomeById = {};
+            bids.forEach(function(b){
+              var stake = Number(b.stake) || 0;
+              var won = Math.random() < AUTO_WIN_RATE;
+              outcomeById[b.id] = won;
+              if (won){
+                wins++;
+                winningBids.push(b);
+                var credit = round2(stake * (1 + BID_PAYOUT_RATE));
+                totalCredited = round2(totalCredited + credit);
+                creditByUser[b.user_id] = round2((creditByUser[b.user_id] || 0) + credit);
+              } else {
+                losses++;
+              }
+            });
+            // Credit each winner's wallet once, with their combined total.
+            var chain = Promise.resolve();
+            Object.keys(creditByUser).forEach(function(uid){
+              chain = chain.then(function(){
+                return sb.from("tn_wallets").select("*").eq("user_id", uid).maybeSingle()
+                  .then(function(wres){
+                    var w = wres.data;
+                    var bal = w ? Number(w.main_balance) || 0 : 0;
+                    var newBal = round2(bal + creditByUser[uid]);
+                    var up = w
+                      ? sb.from("tn_wallets").update({ main_balance: newBal, updated_at: nowISO }).eq("user_id", uid)
+                      : sb.from("tn_wallets").insert({ user_id: uid, main_balance: newBal });
+                    return up.then(function(ures){ if (ures.error) throw ures.error; });
+                  });
+              });
+            });
+            return chain.then(function(){
+              return processBidReferralShares(winningBids, nowISO);
+            }).then(function(refShare){
+              var updates = bids.map(function(b){
+                var stake = Number(b.stake) || 0;
+                var patch = outcomeById[b.id]
+                  ? { status: "won", payout: round2(stake * BID_PAYOUT_RATE), decided_at: nowISO }
+                  : { status: "lost", decided_at: nowISO };
+                return sb.from("tn_bids").update(patch).eq("id", b.id).eq("status", "pending")
+                  .then(function(ures){ if (ures.error) throw ures.error; });
+              });
+              return Promise.all(updates).then(function(){
+                var refNote = refShare && refShare.total > 0
+                  ? " " + fmtUSD(refShare.total) + " in referral shares credited to referrers."
+                  : "";
+                toast("Bids auto-settled",
+                  wins + " bid" + (wins === 1 ? "" : "s") + " won · " + losses + " bid" + (losses === 1 ? "" : "s") +
+                  " lost. " + fmtUSD(totalCredited) + " credited to winners' Main Balances." + refNote);
+              });
+            });
+          })
+          .catch(function(err){
+            if (window.console) console.warn("TrybNetwork admin: auto settlement failed", err);
+          })
+          .then(function(){ autoSettling = false; if (unlocked) refresh(); });
+      }
+      setInterval(function(){ if (unlocked && settlementMode === "auto") autoSettle(); }, 30000);
+
       /* ---------------- sentiment ---------------- */
       var ASSET_NAMES = { BTCUSD: "Bitcoin / USD", ETHUSD: "Ethereum / USD", EURUSD: "Euro / USD", XAUUSD: "Gold / USD" };
       // Simulated sample counts, used only when no demo bids exist yet —
@@ -1069,6 +1250,9 @@
               '<img src="' + esc(r.receipt_url) + '" alt="Deposit receipt" loading="lazy">' +
               "<span>Receipt — tap to view full size</span></a>"
           : "";
+        var txHtml = (isDep && r.tx_hash)
+          ? '<div><a class="req-tx" href="https://tronscan.org/#/transaction/' + esc(r.tx_hash) + '" target="_blank" rel="noopener">View on Tronscan</a></div>'
+          : "";
         var statusTag = r.status === "pending" ? '<span class="req-status">Pending</span>'
           : '<span class="req-status ' + esc(r.status) + '">' + (r.status === "approved" ? "Approved" : "Rejected") + "</span>";
         var btns = r.status === "pending"
@@ -1085,7 +1269,7 @@
           '<div class="req-amt num">' + fmtUSDT(r.amount) + ' <small>· ' + (isDep ? "into" : "out of") + " Main Balance</small></div>" +
           '<div class="req-meta">Requested ' + fmtTime(r.created_at) +
           (r.status !== "pending" && r.decided_at ? " · Decided " + fmtTime(r.decided_at) : "") +
-          "</div>" + receiptHtml + btns + "</div>";
+          "</div>" + receiptHtml + txHtml + btns + "</div>";
       }
       function renderRequests(){
         var box = $("reqList");
@@ -1163,7 +1347,10 @@
           "</div>" +
           '<div class="asset-split">' + assetHtml + "</div>";
 
-        if (rewardConfirm){
+        if (settlementMode === "auto"){
+          // No manual reward controls in automatic mode — the note above
+          // the list explains that bids resolve on the auto-settler's pass.
+        } else if (rewardConfirm){
           var side = rewardConfirm;
           var winSide = side === "high" ? s.high : s.low;
           var loseSide = side === "high" ? s.low : s.high;
@@ -1241,6 +1428,7 @@
         renderAll();
         toast("Welcome, Admin", "You can now manage requests and watch Long vs Short sentiment.");
         refresh().then(function(ok){ if (!ok && !sb) backendDown(); });
+        loadSettlementMode();
         startRealtime();
       }
       function lock(){
@@ -1297,6 +1485,8 @@
           renderBids();
         }
       });
+      $("modeManualBtn").addEventListener("click", function(){ setSettlementMode("manual"); });
+      $("modeAutoBtn").addEventListener("click", function(){ setSettlementMode("auto"); });
       $("refreshBtn").addEventListener("click", function(){
         refresh().then(function(){
           toast("Data refreshed", "Balances, requests, and sentiment now match the shared demo data.");
