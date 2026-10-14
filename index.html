@@ -150,6 +150,35 @@
       .stat .v.gold{ color:var(--gold-ink); }
       @media (max-width:560px){ .stats{ grid-template-columns:repeat(2, 1fr); } }
 
+      /* ---------- Game P&L ---------- */
+      .pl-table{ width:100%; border-collapse:collapse; }
+      .pl-table th{
+        font-size:10.5px; letter-spacing:.8px; text-transform:uppercase; color:var(--muted);
+        text-align:left; font-weight:800; padding:0 6px 8px;
+      }
+      .pl-table th.num, .pl-table td.num{ text-align:right; }
+      .pl-table td{
+        padding:9px 6px; border-top:1px solid var(--line-soft);
+        font-size:14px; vertical-align:middle;
+      }
+      .pl-rank{
+        display:inline-flex; align-items:center; justify-content:center;
+        width:22px; height:22px; border-radius:50%; margin-right:9px;
+        border:1px solid rgba(201,162,75,.5); color:var(--gold-bright);
+        font-size:11.5px; font-weight:800; vertical-align:middle; flex:0 0 auto;
+      }
+      .pl-rank.none{ border-color:var(--line-soft); color:var(--muted-2); }
+      .pl-name{ font-weight:700; }
+      .pl-net{ font-weight:800; }
+      .pl-net.pos{ color:var(--green); }
+      .pl-net.neg{ color:var(--red); }
+      .pl-nodata-cell{ color:var(--muted-2); font-size:13px; }
+      .pl-total td{ border-top:1.5px solid var(--line); font-weight:800; }
+      @media (max-width:420px){
+        .pl-table th, .pl-table td{ padding-left:3px; padding-right:3px; font-size:12.5px; }
+        .pl-rank{ margin-right:6px; width:20px; height:20px; }
+      }
+
       /* ---------- Users ---------- */
       .user-row{
         display:flex; align-items:center; gap:12px;
@@ -172,6 +201,15 @@
         background:var(--amber-bg); color:var(--amber);
         font-size:10.5px; font-weight:800; letter-spacing:.4px;
         padding:2px 7px; border-radius:999px;
+      }
+      .review-tag{
+        display:inline-block; vertical-align:1px; margin-left:6px;
+        background:var(--red-bg); color:var(--red);
+        font-size:10.5px; font-weight:800; letter-spacing:.4px; text-transform:uppercase;
+        padding:2px 7px; border-radius:999px;
+      }
+      .req-block{
+        color:var(--red); font-size:12.5px; font-weight:700; margin-top:7px;
       }
       .miner-status{
         display:inline-block; vertical-align:1px; margin-left:5px;
@@ -479,6 +517,12 @@
           <div class="stat"><div class="v num" id="statMining">$0.00</div><div class="k">Total Mining</div></div>
         </div>
 
+        <section class="panel" aria-label="Game profit and loss">
+          <h2>Game P&amp;L</h2>
+          <p class="sec-sub">What the house kept from each earning option, ranked most profitable first. Only settled bids and plays count — pending ones are still open. Mining compares total miner purchases with recorded profit cashouts.</p>
+          <div id="gamePlBody"></div>
+        </section>
+
         <section class="panel" aria-label="Deposit and withdrawal requests">
           <h2>Deposit &amp; Withdrawal Requests</h2>
           <p class="sec-sub">Approving applies the amount to that user's Main Balance. Rejections leave every balance untouched. All amounts are virtual.</p>
@@ -541,7 +585,7 @@
          demo-grade open RLS), so this panel sees users, requests, and
          bids from ANY device — no shared browser storage involved.
            tn_profiles      id, full_name, username, email, referral_code,
-                            referred_by, created_at
+                            referred_by, wagering_volume, created_at
            tn_wallets       user_id, main_balance,
                             traded_volume, bonus_locked, updated_at
            tn_miners        id, user_id, tier, mining_balance,
@@ -551,8 +595,18 @@
                             created_at, decided_at
            tn_bids          id, user_id, asset, direction, stake, status,
                             payout, created_at, decided_at
+           tn_plays         id, user_id, game (aviator | spin | whot),
+                            stake, payout, status (pending | won | lost),
+                            detail, created_at — casino game rounds,
+                            read tolerantly for the Game P&L section
            tn_referrals     id, referrer_id, referred_id, reward_paid,
                             created_at
+           tn_referral_bonuses
+                            id, referrer_id, referred_id, amount,
+                            status (pending | vested | cancelled),
+                            vests_at, created_at — anti-abuse vesting
+                            for the $3 referral reward; read tolerantly:
+                            a missing table falls back to instant rewards
            tn_referral_earnings
                             id, source_type, source_id, referrer_id,
                             referred_id, amount, created_at
@@ -583,7 +637,10 @@
         minersByUser: {},    // user_id -> [tn_miners rows]
         requests: [],        // tn_requests rows, newest first
         bids: [],            // tn_bids rows, newest first
-        referrals: []        // tn_referrals rows
+        referrals: [],       // tn_referrals rows
+        plays: [],           // tn_plays rows (casino games)
+        playsOk: false       // false until tn_plays answers — Game P&L
+                             // shows "no data yet" for its games until then
       };
       var profileById = {};
       function reindex(){
@@ -656,13 +713,25 @@
           function(r){ return r && r.error ? { data: [] } : r; },
           function(){ return { data: [] }; }
         );
+        // tn_plays is read tolerantly too: if the casino-games table is
+        // missing or errors, the panel still loads and the Game P&L rows
+        // for Aviator / Spin Wheel / Whot read "no data yet".
+        var playsQuery = sb.from("tn_plays").select("*").then(
+          function(r){
+            if (r && r.error){ DB.playsOk = false; return { data: [] }; }
+            DB.playsOk = true;
+            return r;
+          },
+          function(){ DB.playsOk = false; return { data: [] }; }
+        );
         return Promise.all([
           sb.from("tn_profiles").select("*").order("created_at", { ascending: true }),
           sb.from("tn_wallets").select("*"),
           minersQuery,
           sb.from("tn_requests").select("*").order("created_at", { ascending: false }),
           sb.from("tn_bids").select("*").order("created_at", { ascending: false }),
-          sb.from("tn_referrals").select("*")
+          sb.from("tn_referrals").select("*"),
+          playsQuery
         ]).then(function(res){
           for (var i = 0; i < res.length; i++){
             if (res[i].error) throw res[i].error;
@@ -678,6 +747,7 @@
           DB.requests = res[3].data || [];
           DB.bids = res[4].data || [];
           DB.referrals = res[5].data || [];
+          DB.plays = res[6].data || [];
           reindex();
           return true;
         }).catch(function(err){
@@ -732,37 +802,186 @@
       }
 
       /* ---------------- referral reward ---------------- */
+      // Anti-abuse vesting: a referred user's FIRST approved deposit of
+      // $12 or more no longer pays the referrer instantly. A
+      // tn_referral_bonuses row is parked as "pending" with vests_at =
+      // now + 7 days, and processReferralVesting() pays it out lazily
+      // once the vesting date passes AND the referred account's net
+      // deposits (approved deposits minus completed withdrawals) are
+      // still $12 or more — otherwise the bonus is cancelled. If the
+      // tn_referral_bonuses table does not exist yet, the old immediate
+      // credit is used as a fallback.
+      var REFERRAL_MIN_DEPOSIT = 12;   // first deposit must reach this to earn a bonus
+      var REFERRAL_VEST_DAYS = 7;      // days a bonus stays pending before it can vest
+
+      // The panel's shared wallet-credit path: add `amount` to a user's
+      // Main Balance, creating the wallet row when none exists.
+      function creditWalletMain(userId, amount){
+        var nowISO = new Date().toISOString();
+        return sb.from("tn_wallets").select("*").eq("user_id", userId).maybeSingle()
+          .then(function(wres){
+            var w = wres.data;
+            var bal = w ? Number(w.main_balance) || 0 : 0;
+            var newBal = round2(bal + (Number(amount) || 0));
+            var up = w
+              ? sb.from("tn_wallets").update({ main_balance: newBal, updated_at: nowISO }).eq("user_id", userId)
+              : sb.from("tn_wallets").insert({ user_id: userId, main_balance: newBal });
+            return up.then(function(ures){ if (ures.error) throw ures.error; });
+          });
+      }
+
       // After a deposit is approved: if it is that user's FIRST approved
-      // deposit and an unpaid tn_referrals row names them as referred_id,
-      // credit the referrer's Main Balance with 3 USDT and mark it paid.
-      function maybeReferralReward(userId){
+      // deposit of $12+ and an unpaid tn_referrals row names them as
+      // referred_id, park a pending referral bonus for the referrer
+      // (falling back to the old immediate 3 USDT credit when the
+      // bonuses table is missing). Resolves to { name, pending } for
+      // the approval toast, or null when no bonus applies.
+      function maybeReferralReward(userId, depositAmount){
         return sb.from("tn_requests").select("id")
           .eq("user_id", userId).eq("type", "deposit").eq("status", "approved")
           .then(function(res){
             var rows = res.data || [];
             if (rows.length !== 1) return null;   // not the first approved deposit
+            if (!((Number(depositAmount) || 0) >= REFERRAL_MIN_DEPOSIT)) return null;
             return sb.from("tn_referrals").select("*")
               .eq("referred_id", userId).eq("reward_paid", false).limit(1)
               .then(function(rres){
                 var ref = (rres.data || [])[0];
                 if (!ref) return null;
-                return sb.from("tn_wallets").select("*").eq("user_id", ref.referrer_id).maybeSingle()
-                  .then(function(wres){
-                    var w = wres.data;
-                    var bal = w ? Number(w.main_balance) || 0 : 0;
-                    var up = w
-                      ? sb.from("tn_wallets").update({ main_balance: round2(bal + REFERRAL_REWARD), updated_at: new Date().toISOString() }).eq("user_id", ref.referrer_id)
-                      : sb.from("tn_wallets").insert({ user_id: ref.referrer_id, main_balance: REFERRAL_REWARD });
-                    return up.then(function(ures){
-                      if (ures.error) throw ures.error;
-                      return sb.from("tn_referrals").update({ reward_paid: true }).eq("id", ref.id);
-                    }).then(function(){
-                      var rp = profileById[ref.referrer_id];
-                      return rp ? (rp.full_name || rp.username) : "the referrer";
-                    });
-                  });
+                var rp = profileById[ref.referrer_id];
+                var referrerName = rp ? (rp.full_name || rp.username) : "the referrer";
+                function markPaid(){
+                  return sb.from("tn_referrals").update({ reward_paid: true }).eq("id", ref.id)
+                    .then(function(ures){ if (ures.error) throw ures.error; });
+                }
+                function creditNow(){
+                  return creditWalletMain(ref.referrer_id, REFERRAL_REWARD)
+                    .then(markPaid)
+                    .then(function(){ return { name: referrerName, pending: false }; });
+                }
+                var vestsAt = new Date(Date.now() + REFERRAL_VEST_DAYS * 24 * 60 * 60 * 1000).toISOString();
+                return sb.from("tn_referral_bonuses").insert({
+                    referrer_id: ref.referrer_id,
+                    referred_id: userId,
+                    amount: REFERRAL_REWARD,
+                    status: "pending",
+                    vests_at: vestsAt
+                  })
+                  .then(function(ires){
+                    if (ires.error) return creditNow();   // bonuses table missing — pay the old way
+                    return markPaid().then(function(){ return { name: referrerName, pending: true }; });
+                  }, function(){ return creditNow(); });
               });
           }).catch(function(){ return null; });
+      }
+
+      /* ---------------- referral vesting (lazy, on panel load) --------- */
+      // For every pending bonus whose vests_at has passed: if the
+      // referred account's net deposits (approved deposits minus
+      // completed withdrawals) are still $12+, the bonus vests and the
+      // referrer is credited through creditWalletMain; otherwise the
+      // bonus is cancelled. The row is claimed by flipping its status
+      // under a status = "pending" filter first, so a re-run or a
+      // second open panel can never credit the same bonus twice.
+      function netDepositsOf(reqs){
+        var net = 0;
+        (reqs || []).forEach(function(r){
+          if (!r) return;
+          var a = Number(r.amount) || 0;
+          if (r.type === "deposit" && r.status === "approved") net = round2(net + a);
+          else if (r.type === "withdrawal" && (r.status === "approved" || r.status === "completed")) net = round2(net - a);
+        });
+        return net;
+      }
+      var vestingBusy = false;
+      function processReferralVesting(){
+        if (!sb || vestingBusy) return;
+        vestingBusy = true;
+        sb.from("tn_referral_bonuses").select("*")
+          .eq("status", "pending").lte("vests_at", new Date().toISOString())
+          .then(function(res){
+            if (res.error) return null;   // table not there yet — nothing to vest
+            var rows = res.data || [];
+            var changed = false;
+            var chain = Promise.resolve();
+            rows.forEach(function(bonus){
+              chain = chain.then(function(){
+                return sb.from("tn_requests").select("type,amount,status")
+                  .eq("user_id", bonus.referred_id)
+                  .then(function(rres){
+                    if (rres.error) throw rres.error;
+                    var amount = Number(bonus.amount) || REFERRAL_REWARD;
+                    if (netDepositsOf(rres.data || []) >= REFERRAL_MIN_DEPOSIT){
+                      return sb.from("tn_referral_bonuses")
+                        .update({ status: "vested" })
+                        .eq("id", bonus.id).eq("status", "pending")
+                        .select("id")
+                        .then(function(ures){
+                          if (ures.error) throw ures.error;
+                          if (!(ures.data || []).length) return null;   // settled elsewhere
+                          changed = true;
+                          return creditWalletMain(bonus.referrer_id, amount);
+                        });
+                    }
+                    return sb.from("tn_referral_bonuses")
+                      .update({ status: "cancelled" })
+                      .eq("id", bonus.id).eq("status", "pending")
+                      .then(function(ures){ if (!ures.error) changed = true; });
+                  });
+              }).catch(function(err){
+                if (window.console) console.warn("TrybNetwork admin: referral vesting failed", err);
+              });
+            });
+            return chain.then(function(){ return changed; });
+          })
+          .catch(function(){ return false; })
+          .then(function(changed){
+            vestingBusy = false;
+            if (changed && unlocked) refresh();
+          });
+      }
+
+      /* ---------------- wagering requirement ---------------- */
+      // A withdrawal can only be approved once the user has wagered at
+      // least their total approved deposits: tn_profiles.wagering_volume
+      // (read tolerantly — a wallet wagering/traded volume stands in
+      // when the profile carries none) must be >= the sum of their
+      // approved deposits. The block is hard: no override anywhere.
+      function wageringVolume(p, w){
+        if (p && p.wagering_volume != null) return Number(p.wagering_volume) || 0;
+        if (w && w.wagering_volume != null) return Number(w.wagering_volume) || 0;
+        if (w && w.traded_volume != null) return Number(w.traded_volume) || 0;
+        if (p && p.traded_volume != null) return Number(p.traded_volume) || 0;
+        return 0;
+      }
+      function approvedDepositsOf(reqs){
+        var total = 0;
+        (reqs || []).forEach(function(r){
+          if (r && r.type === "deposit" && r.status === "approved") total = round2(total + (Number(r.amount) || 0));
+        });
+        return total;
+      }
+      function wageringBlockReason(userId){
+        var dep = approvedDepositsOf(DB.requests.filter(function(r){ return r.user_id === userId; }));
+        var wag = wageringVolume(profileById[userId], DB.wallets[userId]);
+        return wag < dep
+          ? "Wagering not met: " + fmtUSD(wag) + " traded of " + fmtUSD(dep) + " required"
+          : null;
+      }
+      // Fresh-data version used at approval time.
+      function checkWageringGate(userId){
+        return Promise.all([
+          sb.from("tn_profiles").select("*").eq("id", userId).maybeSingle(),
+          sb.from("tn_requests").select("type,amount,status").eq("user_id", userId)
+        ]).then(function(res){
+          var p = (!res[0].error && res[0].data) || profileById[userId] || {};
+          var reqs = (!res[1].error && res[1].data) || [];
+          var dep = approvedDepositsOf(reqs);
+          var wag = wageringVolume(p, DB.wallets[userId]);
+          return wag < dep
+            ? "Wagering not met: " + fmtUSD(wag) + " traded of " + fmtUSD(dep) + " required"
+            : null;
+        }).catch(function(){ return null; });
       }
 
       /* ---------------- approve / reject ---------------- */
@@ -780,6 +999,20 @@
             var amount = Number(r.amount) || 0;
             var nowISO = new Date().toISOString();
 
+            // Withdrawal approvals are hard-blocked until the wagering
+            // requirement is met — checked on fresh data, no override.
+            if (act === "approve" && r.type === "withdrawal"){
+              return checkWageringGate(r.user_id).then(function(blockReason){
+                if (blockReason){
+                  toast("Cannot approve withdrawal", blockReason, "err");
+                  return null;
+                }
+                return proceedWithAction();
+              });
+            }
+            return proceedWithAction();
+
+            function proceedWithAction(){
             if (act === "reject"){
               return sb.from("tn_requests")
                 .update({ status: "rejected", decided_at: nowISO }).eq("id", id)
@@ -812,8 +1045,9 @@
                       var msg = label + "'s " + (r.type === "deposit" ? "deposit" : "withdrawal") + " of " +
                         fmtUSDT(amount) + " applied to Main Balance. New balance: " + fmtUSD(newBal) + ".";
                       if (r.type === "deposit"){
-                        return maybeReferralReward(r.user_id).then(function(referrerName){
-                          if (referrerName) msg += " Referral reward of 3 USDT credited to " + referrerName + ".";
+                        return maybeReferralReward(r.user_id, amount).then(function(bonus){
+                          if (bonus && bonus.pending) msg += " Referral bonus of 3 USDT for " + bonus.name + " is pending — it vests in 7 days if the referred account's net deposits stay at $12 or more.";
+                          else if (bonus) msg += " Referral reward of 3 USDT credited to " + bonus.name + ".";
                           toast("Request approved", msg);
                         });
                       }
@@ -821,6 +1055,7 @@
                     });
                 });
               });
+            }
           })
           .catch(function(err){
             if (window.console) console.warn("TrybNetwork admin: request action failed", err);
@@ -1184,6 +1419,117 @@
         return { counts: counts, bidsFound: bidsFound };
       }
 
+      /* ---------------- game P&L ---------------- */
+      // House profit per earning option: what users staked minus what
+      // was paid back out, over SETTLED activity only — pending bids and
+      // plays are still open, so their stakes are not house profit yet.
+      //   Binary Trading — tn_bids. A won bid credits the user stake × 1.9
+      //     (the bid's payout field holds the 90% profit part), so paid
+      //     out = stake + payout for won bids, 0 for lost.
+      //   Aviator / Spin Wheel / Whot — tn_plays, grouped by its game
+      //     field; payout is the amount credited back to the user.
+      //   Mining — tn_miners: purchase_price in, recorded profit
+      //     cashouts out (read tolerantly from any cashout-style field).
+      // An option with no settled rows — or whose table is missing —
+      // reports has:false and renders as "no data yet".
+      function gamePLRows(){
+        var rows = [];
+
+        var settledBids = DB.bids.filter(function(b){ return b && (b.status === "won" || b.status === "lost"); });
+        if (settledBids.length){
+          var bStaked = 0, bPaid = 0;
+          settledBids.forEach(function(b){
+            var stake = Number(b.stake) || 0;
+            bStaked = round2(bStaked + stake);
+            if (b.status === "won") bPaid = round2(bPaid + stake + (Number(b.payout) || 0));
+          });
+          rows.push({ name: "Binary Trading", staked: bStaked, paid: bPaid, has: true });
+        } else {
+          rows.push({ name: "Binary Trading", has: false });
+        }
+
+        var PLAY_GAMES = [
+          { name: "Aviator", keys: ["aviator"] },
+          { name: "Spin Wheel", keys: ["spin", "spin_wheel", "spinwheel", "wheel"] },
+          { name: "Whot", keys: ["whot"] }
+        ];
+        PLAY_GAMES.forEach(function(g){
+          if (!DB.playsOk){ rows.push({ name: g.name, has: false }); return; }
+          var staked = 0, paid = 0, n = 0;
+          DB.plays.forEach(function(p){
+            if (!p) return;
+            if (g.keys.indexOf(String(p.game || "").toLowerCase()) === -1) return;
+            var st = p.status || p.result || "";
+            if (st !== "won" && st !== "lost") return;   // still open
+            staked = round2(staked + (Number(p.stake) || 0));
+            paid = round2(paid + (Number(p.payout) || 0));
+            n++;
+          });
+          rows.push(n ? { name: g.name, staked: staked, paid: paid, has: true } : { name: g.name, has: false });
+        });
+
+        var miners = [];
+        Object.keys(DB.minersByUser).forEach(function(uid){ miners = miners.concat(DB.minersByUser[uid]); });
+        if (miners.length){
+          var mIn = 0, mOut = 0;
+          miners.forEach(function(m){
+            var price = m.purchase_price != null ? m.purchase_price
+                      : m.price != null ? m.price : m.amount;
+            mIn = round2(mIn + (Number(price) || 0));
+            var co = m.total_cashout != null ? m.total_cashout
+                   : m.cashed_out != null ? m.cashed_out
+                   : m.cashout_total != null ? m.cashout_total
+                   : m.total_paid_out != null ? m.total_paid_out : m.paid_out;
+            mOut = round2(mOut + (Number(co) || 0));
+          });
+          rows.push({ name: "Mining", staked: mIn, paid: mOut, has: true });
+        } else {
+          rows.push({ name: "Mining", has: false });
+        }
+
+        rows.forEach(function(r){ if (r.has) r.net = round2(r.staked - r.paid); });
+        // Rank by house profit, best first; options without data sink
+        // to the bottom, keeping their listed order among themselves.
+        rows.sort(function(a, b){
+          if (a.has && b.has) return b.net - a.net;
+          if (a.has) return -1;
+          if (b.has) return 1;
+          return 0;
+        });
+        return rows;
+      }
+      function plNetCell(net){
+        var cls = net > 0 ? "pos" : net < 0 ? "neg" : "";
+        return '<td class="num pl-net ' + cls + '">' + (net > 0 ? "+" : "") + fmtUSD(net) + "</td>";
+      }
+      function renderGamePL(){
+        var box = $("gamePlBody");
+        if (!box) return;
+        var rows = gamePLRows();
+        var rank = 0, tStaked = 0, tPaid = 0, anyData = false;
+        var body = rows.map(function(r){
+          if (!r.has){
+            return "<tr><td>" + '<span class="pl-rank none">–</span><span class="pl-name">' + esc(r.name) + "</span></td>" +
+              '<td class="pl-nodata-cell" colspan="3">No data yet</td></tr>';
+          }
+          anyData = true;
+          rank++;
+          tStaked = round2(tStaked + r.staked);
+          tPaid = round2(tPaid + r.paid);
+          return "<tr><td>" + '<span class="pl-rank">' + rank + '</span><span class="pl-name">' + esc(r.name) + "</span></td>" +
+            '<td class="num">' + fmtUSD(r.staked) + "</td>" +
+            '<td class="num">' + fmtUSD(r.paid) + "</td>" +
+            plNetCell(r.net) + "</tr>";
+        }).join("");
+        var total = anyData
+          ? '<tr class="pl-total"><td>All options</td><td class="num">' + fmtUSD(tStaked) + '</td><td class="num">' +
+            fmtUSD(tPaid) + "</td>" + plNetCell(round2(tStaked - tPaid)) + "</tr>"
+          : '<tr class="pl-total"><td>All options</td><td class="pl-nodata-cell" colspan="3">No data yet</td></tr>';
+        box.innerHTML = '<table class="pl-table"><thead><tr><th scope="col">Earning option</th>' +
+          '<th scope="col" class="num">Staked</th><th scope="col" class="num">Paid out</th>' +
+          '<th scope="col" class="num">House P&amp;L</th></tr></thead><tbody>' + body + total + "</tbody></table>";
+      }
+
       /* ---------------- rendering ---------------- */
       function renderStats(){
         var totalMain = 0, totalMining = 0;
@@ -1204,6 +1550,33 @@
         }
         return null;
       }
+      // Per-user money picture for the users list: approved deposits,
+      // completed (approved) withdrawals, and the resulting net.
+      function userMoneyStats(userId){
+        var dep = 0, wd = 0;
+        DB.requests.forEach(function(r){
+          if (!r || r.user_id !== userId) return;
+          var a = Number(r.amount) || 0;
+          if (r.type === "deposit" && r.status === "approved") dep = round2(dep + a);
+          else if (r.type === "withdrawal" && (r.status === "approved" || r.status === "completed")) wd = round2(wd + a);
+        });
+        return { deposits: dep, withdrawn: wd, net: round2(dep - wd) };
+      }
+      // How many accounts this user has referred — tn_referrals rows,
+      // unioned with profiles whose referred_by resolves to this user,
+      // so a referral recorded in only one of the two places still counts.
+      function referralCountOf(userId){
+        var ids = {};
+        DB.referrals.forEach(function(r){
+          if (r && r.referrer_id === userId && r.referred_id) ids[r.referred_id] = true;
+        });
+        DB.profiles.forEach(function(q){
+          if (!q.referred_by) return;
+          var ref = resolveReferrer(q);
+          if (ref && ref.id === userId) ids[q.id] = true;
+        });
+        return Object.keys(ids).length;
+      }
       function renderUsers(){
         var box = $("userList");
         if (!DB.profiles.length){
@@ -1218,6 +1591,9 @@
           var miners = minersOf(p.id);
           var primary = primaryMiner(p.id);
           var anyRunning = miners.some(function(m){ return minerStatus(m) === "running"; });
+          var money = userMoneyStats(p.id);
+          var wag = wageringVolume(p, w);
+          var refCount = referralCountOf(p.id);
           var minerLine = primary
             ? "<br>Miner · " + esc(minerTier(primary)) +
               '<span class="miner-status ' + (anyRunning ? "running" : "idle") + '">' + (anyRunning ? "Running" : "Idle") + "</span>"
@@ -1225,12 +1601,15 @@
           return '<div class="user-row">' +
             '<span class="avatar">' + esc(avatarInitials(p.full_name || p.username)) + "</span>" +
             '<div class="u-main"><div class="u-name">' + esc(p.full_name || p.username) +
-              (pend ? '<span class="pend-tag">' + pend + " pending</span>" : "") + "</div>" +
+              (pend ? '<span class="pend-tag">' + pend + " pending</span>" : "") +
+              (refCount >= 3 ? '<span class="review-tag">Review</span>' : "") + "</div>" +
               '<div class="u-sub">@' + esc(p.username) + (p.email ? " · " + esc(p.email) : "") +
               "<br>Joined " + fmtTime(p.created_at) +
               (p.referral_code ? " · Code " + esc(p.referral_code) : "") +
               (p.referred_by ? "<br>Referred by " + esc(referrer ? (referrer.full_name || referrer.username) : p.referred_by) : "") +
               minerLine +
+              "<br>Net deposits " + fmtUSD(money.net) + " · Wagered " + fmtUSD(wag) + " of " + fmtUSD(money.deposits) +
+                " · " + refCount + " referral" + (refCount === 1 ? "" : "s") +
               "</div></div>" +
             '<div class="u-bal"><div class="b num">' + fmtUSD(w.main_balance) + '</div><div class="k">Main</div></div>' +
             '<div class="u-bal"><div class="b num">' + fmtUSD(miningBalanceOf(p.id)) + '</div><div class="k">Mining</div></div>' +
@@ -1255,6 +1634,8 @@
           : "";
         var statusTag = r.status === "pending" ? '<span class="req-status">Pending</span>'
           : '<span class="req-status ' + esc(r.status) + '">' + (r.status === "approved" ? "Approved" : "Rejected") + "</span>";
+        var blockReason = (r.status === "pending" && !isDep) ? wageringBlockReason(r.user_id) : null;
+        var blockHtml = blockReason ? '<div class="req-block">' + esc(blockReason) + "</div>" : "";
         var btns = r.status === "pending"
           ? '<div class="req-btns">' +
               '<button class="btn-approve" type="button" data-act="approve" data-user="' + esc(r.user_id) + '" data-id="' + esc(r.id) + '">Approve</button>' +
@@ -1269,7 +1650,7 @@
           '<div class="req-amt num">' + fmtUSDT(r.amount) + ' <small>· ' + (isDep ? "into" : "out of") + " Main Balance</small></div>" +
           '<div class="req-meta">Requested ' + fmtTime(r.created_at) +
           (r.status !== "pending" && r.decided_at ? " · Decided " + fmtTime(r.decided_at) : "") +
-          "</div>" + receiptHtml + txHtml + btns + "</div>";
+          "</div>" + receiptHtml + txHtml + blockHtml + btns + "</div>";
       }
       function renderRequests(){
         var box = $("reqList");
@@ -1396,6 +1777,7 @@
       }
       function renderAll(){
         renderStats();
+        renderGamePL();
         renderRequests();
         renderBids();
         renderUsers();
@@ -1427,7 +1809,10 @@
         $("panelRoot").hidden = false;
         renderAll();
         toast("Welcome, Admin", "You can now manage requests and watch Long vs Short sentiment.");
-        refresh().then(function(ok){ if (!ok && !sb) backendDown(); });
+        refresh().then(function(ok){
+          if (!ok && !sb) backendDown();
+          processReferralVesting();
+        });
         loadSettlementMode();
         startRealtime();
       }
@@ -1489,6 +1874,7 @@
       $("modeAutoBtn").addEventListener("click", function(){ setSettlementMode("auto"); });
       $("refreshBtn").addEventListener("click", function(){
         refresh().then(function(){
+          processReferralVesting();
           toast("Data refreshed", "Balances, requests, and sentiment now match the shared demo data.");
         });
       });
@@ -1581,7 +1967,7 @@
       function startRealtime(){
         if (!sb || realtimeStarted) return;
         realtimeStarted = true;
-        ["tn_requests", "tn_bids", "tn_wallets", "tn_miners"].forEach(function(t){
+        ["tn_requests", "tn_bids", "tn_wallets", "tn_miners", "tn_plays"].forEach(function(t){
           try {
             sb.channel("tn-admin-" + t)
               .on("postgres_changes", { event: "*", schema: "public", table: t }, function(){ refresh(); })
