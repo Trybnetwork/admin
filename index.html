@@ -228,6 +228,15 @@
       .req-amt{ font-size:19px; font-weight:800; margin:8px 0 2px; }
       .req-amt small{ font-size:12px; color:var(--muted); font-weight:600; }
       .req-meta{ color:var(--muted); font-size:12.5px; line-height:1.55; }
+      .req-receipt{
+        display:inline-flex; align-items:center; gap:10px; margin-top:10px;
+        text-decoration:none; color:var(--gold-bright); font-size:12.5px; font-weight:700;
+      }
+      .req-receipt img{
+        width:56px; height:56px; object-fit:cover; border-radius:10px;
+        border:1px solid rgba(201,162,75,.35); background:var(--card-2); display:block;
+      }
+      .req-receipt:active{ opacity:.75; }
       .req-btns{ display:flex; gap:10px; margin-top:11px; }
       .req-btns button{
         flex:1 1 0; height:42px; border-radius:11px; border:none;
@@ -457,7 +466,7 @@
 
         <section class="panel" aria-label="Pending bids">
           <h2>Pending Bids</h2>
-          <p class="sec-sub">Open High / Low bids placed in the Trade &amp; Save app, waiting on a result. Settlement is by direction, not per person: Reward HIGH and every pending High bid wins — stake × 1.9 credited to that user's Main Balance (stake back plus a 90% payout) — while every pending Low bid loses its stake, which was already locked when the bid was placed. Reward LOW does the reverse. All amounts are virtual.</p>
+          <p class="sec-sub">Open High / Low bids placed in the Trade &amp; Save app, waiting on a result. Settlement is by direction, not per person: Reward HIGH and every pending High bid wins — stake × 1.9 credited to that user's Main Balance (stake back plus a 90% payout) — while every pending Low bid loses its stake, which was already locked when the bid was placed. Reward LOW does the reverse. For each winning bid, the winner's referrer (if any) also gets 1% of the win profit — (stake × 0.9) × 1% — credited to their Main Balance, once per bid. All amounts are virtual.</p>
           <div id="bidList"></div>
         </section>
 
@@ -515,6 +524,10 @@
                             payout, created_at, decided_at
            tn_referrals     id, referrer_id, referred_id, reward_paid,
                             created_at
+           tn_referral_earnings
+                            id, source_type, source_id, referrer_id,
+                            referred_id, amount, created_at
+                            (unique on source_type + source_id)
          Realtime subscriptions on tn_requests / tn_bids / tn_wallets /
          tn_miners keep the panel live, with a 15-second polling fallback. All funds are
          virtual — this is a simulation.
@@ -522,6 +535,7 @@
       var ADMIN_PIN = "1234";
       var REFERRAL_REWARD = 3;      // USDT credited to the referrer
       var BID_PAYOUT_RATE = 0.9;    // a winning bid credits stake × 1.9: 90% profit on a won bid
+      var REFERRAL_BID_SHARE_RATE = 0.01; // referrer gets 1% of a winning bid's 90% profit: (stake × 0.9) × 0.01
 
       var SUPABASE_URL = "https://zvubytosshkxpbpvgcsw.supabase.co";
       var SUPABASE_ANON_KEY = "sb_publishable_c1sl1Mw4Y5EMWjkmYSzEow_m5Yowqk0";
@@ -790,10 +804,111 @@
       // stake × 1.9 (stake back plus the 90% payout) and the bid records
       // payout = 90% of the stake (stake × 0.9). Bids on the other side are marked lost with
       // nothing further taken — the stake was already locked when the bid
-      // was placed. Same tn_bids status/payout/decided_at fields and the
-      // same wallet updates as the old per-bid flow, so the user app picks
-      // the results up unchanged.
+      // was placed. Each winning bid also pays its referrer a 1% share of
+      // the win profit via tn_referral_earnings (see
+      // processBidReferralShares). Same tn_bids status/payout/decided_at
+      // fields and the same wallet updates as the old per-bid flow, so
+      // the user app picks the results up unchanged.
       var rewardConfirm = null;   // "high" | "low" while a confirmation is showing
+
+      // Referral profit share for one settlement pass. For each winning
+      // bid, after the winner has been credited: look up tn_referrals for
+      // referred_id = the winner's user id; if a referrer exists, record
+      // the share in tn_referral_earnings (source_type "bid", source_id =
+      // the bid's id, amount = (stake × 0.9) × 1%) and credit the
+      // referrer's Main Balance by that amount. The insert uses
+      // ignore-duplicates semantics against the unique
+      // (source_type, source_id) constraint, and the referrer is credited
+      // ONLY when the insert actually created a row — so a re-run, a
+      // retry, or a second client settling at the same time can never
+      // double-pay a share for the same bid. Referral failures are
+      // logged per bid and never abort the settlement itself.
+      // Resolves to { count, total } for the shares actually credited.
+      function processBidReferralShares(winningBids, nowISO){
+        var result = { count: 0, total: 0 };
+        if (!winningBids.length) return Promise.resolve(result);
+        var referrerByWinner = {};   // winner user_id -> referrer_id | null (looked up once per winner)
+        var creditByReferrer = {};   // referrer_id -> combined share from rows this pass actually inserted
+
+        function lookupReferrer(winnerId){
+          if (Object.prototype.hasOwnProperty.call(referrerByWinner, winnerId)){
+            return Promise.resolve(referrerByWinner[winnerId]);
+          }
+          return sb.from("tn_referrals").select("*")
+            .eq("referred_id", winnerId).limit(1)
+            .then(function(res){
+              if (res.error) throw res.error;
+              var row = (res.data || [])[0];
+              referrerByWinner[winnerId] = row ? row.referrer_id : null;
+              return referrerByWinner[winnerId];
+            });
+        }
+
+        // One bid at a time, so the insert-then-credit decision for each
+        // bid is unambiguous even if the same referrer appears repeatedly.
+        var chain = Promise.resolve();
+        winningBids.forEach(function(b){
+          chain = chain.then(function(){
+            var stake = Number(b.stake) || 0;
+            var amount = round2((stake * BID_PAYOUT_RATE) * REFERRAL_BID_SHARE_RATE);
+            if (!(amount > 0)) return null;
+            return lookupReferrer(b.user_id).then(function(referrerId){
+              if (!referrerId) return null;
+              return sb.from("tn_referral_earnings")
+                .upsert({
+                  source_type: "bid",
+                  source_id: b.id,
+                  referrer_id: referrerId,
+                  referred_id: b.user_id,
+                  amount: amount
+                }, { onConflict: "source_type,source_id", ignoreDuplicates: true })
+                .select("id")
+                .then(function(res){
+                  if (res.error){
+                    // A plain unique-violation (a concurrent insert that
+                    // landed first) also means: not created by us, no credit.
+                    if (res.error.code === "23505") return null;
+                    throw res.error;
+                  }
+                  var created = (res.data || []).length > 0;
+                  if (!created) return null;   // duplicate — already paid (or being paid) elsewhere
+                  creditByReferrer[referrerId] = round2((creditByReferrer[referrerId] || 0) + amount);
+                  result.count++;
+                  result.total = round2(result.total + amount);
+                  return null;
+                });
+            });
+          }).catch(function(err){
+            if (window.console) console.warn("TrybNetwork admin: referral share failed for bid " + b.id, err);
+            return null;
+          });
+        });
+
+        // Credit each referrer's Main Balance once, with the combined
+        // total of the shares whose earnings rows this pass created.
+        return chain.then(function(){
+          var creditChain = Promise.resolve();
+          Object.keys(creditByReferrer).forEach(function(rid){
+            creditChain = creditChain.then(function(){
+              return sb.from("tn_wallets").select("*").eq("user_id", rid).maybeSingle()
+                .then(function(wres){
+                  var w = wres.data;
+                  var bal = w ? Number(w.main_balance) || 0 : 0;
+                  var newBal = round2(bal + creditByReferrer[rid]);
+                  var up = w
+                    ? sb.from("tn_wallets").update({ main_balance: newBal, updated_at: nowISO }).eq("user_id", rid)
+                    : sb.from("tn_wallets").insert({ user_id: rid, main_balance: newBal });
+                  return up.then(function(ures){ if (ures.error) throw ures.error; });
+                })
+                .catch(function(err){
+                  if (window.console) console.warn("TrybNetwork admin: referral share credit failed for referrer " + rid, err);
+                });
+            });
+          });
+          return creditChain.then(function(){ return result; });
+        });
+      }
+
       function settleAllBids(side){
         if (actionBusy) return;
         if (!sb){ backendDown(); return; }
@@ -812,10 +927,12 @@
             var nowISO = new Date().toISOString();
             var wins = 0, losses = 0, totalCredited = 0;
             var creditByUser = {};
+            var winningBids = [];
             bids.forEach(function(b){
               var stake = Number(b.stake) || 0;
               if (b.direction === side){
                 wins++;
+                winningBids.push(b);
                 var credit = round2(stake * (1 + BID_PAYOUT_RATE));
                 totalCredited = round2(totalCredited + credit);
                 creditByUser[b.user_id] = round2((creditByUser[b.user_id] || 0) + credit);
@@ -840,6 +957,12 @@
               });
             });
             return chain.then(function(){
+              // Winners are credited — now the referral profit share for
+              // each winning bid (idempotent per bid; see
+              // processBidReferralShares). Still inside this settlement
+              // pass, which only ever touches bids that were pending.
+              return processBidReferralShares(winningBids, nowISO);
+            }).then(function(refShare){
               var updates = bids.map(function(b){
                 var stake = Number(b.stake) || 0;
                 var patch = b.direction === side
@@ -849,9 +972,12 @@
                   .then(function(ures){ if (ures.error) throw ures.error; });
               });
               return Promise.all(updates).then(function(){
+                var refNote = refShare && refShare.total > 0
+                  ? " " + fmtUSD(refShare.total) + " in referral shares credited to referrers."
+                  : "";
                 toast((side === "high" ? "HIGH" : "LOW") + " rewarded",
                   wins + " bid" + (wins === 1 ? "" : "s") + " won · " + losses + " bid" + (losses === 1 ? "" : "s") +
-                  " lost. " + fmtUSD(totalCredited) + " credited to winners' Main Balances.");
+                  " lost. " + fmtUSD(totalCredited) + " credited to winners' Main Balances." + refNote);
               });
             });
           })
@@ -946,6 +1072,11 @@
           if (r.method === "bank") methodTag = '<span class="req-method">Bank Transfer</span>';
           else if (r.method === "crypto") methodTag = '<span class="req-method">Crypto</span>';
         }
+        var receiptHtml = r.receipt_url
+          ? '<a class="req-receipt" href="' + esc(r.receipt_url) + '" target="_blank" rel="noopener">' +
+              '<img src="' + esc(r.receipt_url) + '" alt="Deposit receipt" loading="lazy">' +
+              "<span>Receipt — tap to view full size</span></a>"
+          : "";
         var statusTag = r.status === "pending" ? '<span class="req-status">Pending</span>'
           : '<span class="req-status ' + esc(r.status) + '">' + (r.status === "approved" ? "Approved" : "Rejected") + "</span>";
         var btns = r.status === "pending"
@@ -962,7 +1093,7 @@
           '<div class="req-amt num">' + fmtUSDT(r.amount) + ' <small>· ' + (isDep ? "into" : "out of") + " Main Balance</small></div>" +
           '<div class="req-meta">Requested ' + fmtTime(r.created_at) +
           (r.status !== "pending" && r.decided_at ? " · Decided " + fmtTime(r.decided_at) : "") +
-          "</div>" + btns + "</div>";
+          "</div>" + receiptHtml + btns + "</div>";
       }
       function renderRequests(){
         var box = $("reqList");
