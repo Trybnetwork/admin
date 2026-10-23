@@ -1724,6 +1724,12 @@
         return Object.keys(ids).length;
       }
       var selectedUserId = null;
+      var COUNTRY_LABELS = { NG:"🇳🇬 Nigeria", GH:"🇬🇭 Ghana", KE:"🇰🇪 Kenya", ZA:"🇿🇦 South Africa", TZ:"🇹🇿 Tanzania", UG:"🇺🇬 Uganda", CM:"🇨🇲 Cameroon", SN:"🇸🇳 Senegal", EG:"🇪🇬 Egypt", MA:"🇲🇦 Morocco", US:"🇺🇸 United States", GB:"🇬🇧 United Kingdom", DE:"🇩🇪 Germany", FR:"🇫🇷 France", ES:"🇪🇸 Spain", IT:"🇮🇹 Italy", NL:"🇳🇱 Netherlands", CA:"🇨🇦 Canada", AE:"🇦🇪 UAE", SA:"🇸🇦 Saudi Arabia", IN:"🇮🇳 India", PK:"🇵🇰 Pakistan", BD:"🇧🇩 Bangladesh", PH:"🇵🇭 Philippines", ID:"🇮🇩 Indonesia", CN:"🇨🇳 China", JP:"🇯🇵 Japan", BR:"🇧🇷 Brazil", MX:"🇲🇽 Mexico", TR:"🇹🇷 Turkey", AU:"🇦🇺 Australia" };
+      function countryLabel(code){
+        code = String(code || "").toUpperCase();
+        if (!code) return "Country not set (treated as Nigeria)";
+        return "Country " + (COUNTRY_LABELS[code] || code);
+      }
       function userRowHtml(p){
           var w = walletOf(p.id);
           var pend = DB.requests.filter(function(r){ return r.user_id === p.id && r.status === "pending"; }).length;
@@ -1760,7 +1766,7 @@
               (refCount >= 3 ? '<span class="review-tag">Review</span>' : "") +
               (frozen ? '<span class="frozen-tag">Frozen</span>' : "") + "</div>" +
               '<div class="u-sub">@' + esc(p.username) + (p.email ? " · " + esc(p.email) : "") +
-              "<br>Joined " + fmtTime(p.created_at) +
+              "<br>Joined " + fmtTime(p.created_at) + " · " + esc(countryLabel(p.country)) +
               (p.referral_code ? " · Code " + esc(p.referral_code) : "") +
               (p.referred_by ? "<br>Referred by " + esc(referrer ? (referrer.full_name || referrer.username) : p.referred_by) : "") +
               minerLine +
