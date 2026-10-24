@@ -63,7 +63,8 @@
         color:#F1EEE1;
       }
       .header-in{
-        max-width:820px; margin:0 auto; padding:10px 16px;
+        max-width:820px; margin:0 auto;
+        padding:calc(10px + env(safe-area-inset-top)) 16px 10px;
         display:flex; align-items:center; gap:12px;
       }
       .logo{
@@ -711,7 +712,7 @@
 
         <section class="danger" aria-label="Reset data">
           <h2>Reset Data</h2>
-          <p>Clear history removes only processed deposit/withdrawal requests, settled bids, and login session records — accounts, balances, and pending items stay untouched. Reset clears all data — registered accounts, balances, requests, referrals, and trade history — for both this panel and the TrybNetwork Admin app on this device.</p>
+          <p>Clear history removes only processed deposit/withdrawal requests, settled bids, processed TrybCoin requests, and login session records — accounts, balances, and pending items stay untouched. Reset clears all data — registered accounts, balances, requests, referrals, and trade history — for both this panel and the TrybNetwork Admin app on this device.</p>
           <div class="danger-btns">
             <button class="btn-clear" type="button" id="clearHistoryBtn">Clear history</button>
             <button class="btn-reset" type="button" id="resetBtn">Reset data</button>
@@ -2430,21 +2431,25 @@
         btn.textContent = "Clear history";
         if (!sb){ backendDown(); return; }
         // History only: processed requests (approved / rejected),
-        // settled bids (won / lost), and all login session records.
+        // settled bids (won / lost), processed coin requests
+        // (anything not pending), and all login session records.
         // Pending rows, profiles, wallets, balances, miners, and
         // referrals are never touched.
         var reqCount = DB.requests.filter(function(r){ return r.status === "approved" || r.status === "rejected"; }).length;
         var bidCount = DB.bids.filter(function(b){ return b.status === "won" || b.status === "lost"; }).length;
+        var coinCount = (DB.coinRequests || []).filter(function(r){ return r.status !== "pending"; }).length;
         var sesCount = (DB.sessions || []).length;
         Promise.all([
           sb.from("tn_requests").delete().in("status", ["approved", "rejected"]),
           sb.from("tn_bids").delete().in("status", ["won", "lost"]),
+          sb.from("tn_coin_requests").delete().neq("status", "pending"),
           sb.from("tn_login_sessions").delete().not("id", "is", null)
         ]).then(function(res){
           for (var i = 0; i < res.length; i++){ if (res[i].error) throw res[i].error; }
           toast("History cleared",
             reqCount + " processed request" + (reqCount === 1 ? "" : "s") + ", " +
-            bidCount + " settled bid" + (bidCount === 1 ? "" : "s") + ", and " +
+            bidCount + " settled bid" + (bidCount === 1 ? "" : "s") + ", " +
+            coinCount + " processed TrybCoin request" + (coinCount === 1 ? "" : "s") + ", and " +
             sesCount + " login session" + (sesCount === 1 ? "" : "s") +
             " removed. Pending items, balances, and accounts were left untouched.");
         }).catch(function(err){
