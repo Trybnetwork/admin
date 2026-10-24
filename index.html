@@ -876,15 +876,15 @@
 
       /* ---------------- referral reward ---------------- */
       // Anti-abuse vesting: a referred user's FIRST approved deposit of
-      // $12 or more no longer pays the referrer instantly. A
+      // $10 or more no longer pays the referrer instantly. A
       // tn_referral_bonuses row is parked as "pending" with vests_at =
       // now + 7 days, and processReferralVesting() pays it out lazily
       // once the vesting date passes AND the referred account's net
       // deposits (approved deposits minus completed withdrawals) are
-      // still $12 or more — otherwise the bonus is cancelled. If the
+      // still $10 or more — otherwise the bonus is cancelled. If the
       // tn_referral_bonuses table does not exist yet, the old immediate
       // credit is used as a fallback.
-      var REFERRAL_MIN_DEPOSIT = 12;   // first deposit must reach this to earn a bonus
+      var REFERRAL_MIN_DEPOSIT = 10;   // first deposit must reach this to earn a bonus
       var REFERRAL_VEST_DAYS = 7;      // days a bonus stays pending before it can vest
 
       // The panel's shared wallet-credit path: add `amount` to a user's
@@ -904,7 +904,7 @@
       }
 
       // After a deposit is approved: if it is that user's FIRST approved
-      // deposit of $12+ and an unpaid tn_referrals row names them as
+      // deposit of $10+ and an unpaid tn_referrals row names them as
       // referred_id, park a pending referral bonus for the referrer
       // (falling back to the old immediate 3 USDT credit when the
       // bonuses table is missing). Resolves to { name, pending } for
@@ -951,7 +951,7 @@
       /* ---------------- referral vesting (lazy, on panel load) --------- */
       // For every pending bonus whose vests_at has passed: if the
       // referred account's net deposits (approved deposits minus
-      // completed withdrawals) are still $12+, the bonus vests and the
+      // completed withdrawals) are still $10+, the bonus vests and the
       // referrer is credited through creditWalletMain; otherwise the
       // bonus is cancelled. The row is claimed by flipping its status
       // under a status = "pending" filter first, so a re-run or a
@@ -1194,7 +1194,7 @@
                         fmtUSDT(amount) + " applied to Main Balance. New balance: " + fmtUSD(newBal) + ".";
                       if (r.type === "deposit"){
                         return maybeReferralReward(r.user_id, amount).then(function(bonus){
-                          if (bonus && bonus.pending) msg += " Referral bonus of 3 USDT for " + bonus.name + " is pending — it vests in 7 days if the referred account's net deposits stay at $12 or more.";
+                          if (bonus && bonus.pending) msg += " Referral bonus of 3 USDT for " + bonus.name + " is pending — it vests in 7 days if the referred account's net deposits stay at $10 or more.";
                           else if (bonus) msg += " Referral reward of 3 USDT credited to " + bonus.name + ".";
                           toast("Request approved", msg);
                         });
