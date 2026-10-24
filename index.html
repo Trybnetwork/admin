@@ -903,19 +903,20 @@
           });
       }
 
-      // After a deposit is approved: if it is that user's FIRST approved
-      // deposit of $10+ and an unpaid tn_referrals row names them as
-      // referred_id, park a pending referral bonus for the referrer
-      // (falling back to the old immediate 3 USDT credit when the
-      // bonuses table is missing). Resolves to { name, pending } for
-      // the approval toast, or null when no bonus applies.
+      // After a deposit is approved: if that user's NET approved
+      // deposits (deposits minus withdrawals, cumulative across any
+      // mix of deposits) have reached $10+ and an unpaid tn_referrals
+      // row names them as referred_id, park a pending referral bonus
+      // for the referrer (falling back to the old immediate 3 USDT
+      // credit when the bonuses table is missing). Resolves to
+      // { name, pending } for the approval toast, or null when no
+      // bonus applies.
       function maybeReferralReward(userId, depositAmount){
-        return sb.from("tn_requests").select("id")
-          .eq("user_id", userId).eq("type", "deposit").eq("status", "approved")
+        return sb.from("tn_requests").select("type, amount, status")
+          .eq("user_id", userId)
           .then(function(res){
             var rows = res.data || [];
-            if (rows.length !== 1) return null;   // not the first approved deposit
-            if (!((Number(depositAmount) || 0) >= REFERRAL_MIN_DEPOSIT)) return null;
+            if (!(netDepositsOf(rows) >= REFERRAL_MIN_DEPOSIT)) return null;   // cumulative net below $10
             return sb.from("tn_referrals").select("*")
               .eq("referred_id", userId).eq("reward_paid", false).limit(1)
               .then(function(rres){
