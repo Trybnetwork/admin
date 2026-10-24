@@ -88,6 +88,76 @@
         .brand .wordmark{ font-size:16.5px; letter-spacing:1.8px; }
       }
 
+      /* ---------- Admin notifications (header bell) ---------- */
+      .notif-wrap{ position:relative; flex:0 0 auto; }
+      .notif-wrap[hidden]{ display:none; }
+      .notif-bell{
+        position:relative; width:40px; height:40px; border-radius:50%;
+        border:1px solid rgba(201,162,75,.55); background:transparent;
+        color:var(--gold); display:flex; align-items:center; justify-content:center;
+        padding:0;
+      }
+      .notif-bell svg{ width:20px; height:20px; display:block; }
+      .notif-badge{
+        position:absolute; top:-4px; right:-4px; min-width:18px; height:18px;
+        padding:0 5px; border-radius:9px; background:var(--red); color:#fff;
+        font-size:11px; font-weight:700; line-height:1;
+        display:flex; align-items:center; justify-content:center;
+      }
+      .notif-badge[hidden]{ display:none; }
+      .notif-drop{
+        position:absolute; right:0; top:calc(100% + 10px); z-index:60;
+        width:min(340px, calc(100vw - 24px));
+        background:var(--card); color:var(--text);
+        border:1px solid var(--line-soft); border-radius:14px;
+        box-shadow:var(--shadow); overflow:hidden; text-align:left;
+      }
+      .notif-drop[hidden]{ display:none; }
+      .notif-head{
+        display:flex; align-items:center; justify-content:space-between;
+        padding:12px 14px; border-bottom:1px solid var(--line-soft);
+        font-size:13px; font-weight:800; letter-spacing:1.2px;
+        text-transform:uppercase; color:var(--gold-ink);
+      }
+      .notif-clear{
+        background:none; border:none; padding:4px; cursor:pointer;
+        color:var(--gold-ink); font-size:12.5px; font-weight:600;
+        text-transform:none; letter-spacing:0;
+      }
+      .notif-list{ max-height:55vh; overflow-y:auto; }
+      .notif-item{ padding:10px 14px; border-bottom:1px solid var(--line-soft); }
+      .notif-item:last-child{ border-bottom:none; }
+      .notif-item.unread{ box-shadow:inset 3px 0 0 var(--gold); }
+      .notif-text{ font-size:14px; font-weight:600; }
+      .notif-sub{ font-size:12.5px; color:var(--muted); margin-top:1px; }
+      .notif-time{ font-size:11.5px; color:var(--muted-2); margin-top:2px; }
+      .notif-empty{ padding:16px 14px; color:var(--muted); font-size:13px; text-align:center; }
+
+      /* ---------- Admin phone push (row inside notifications) ---------- */
+      .push-row{
+        display:flex; align-items:center; gap:12px;
+        padding:12px 14px; border-bottom:1px solid var(--line-soft);
+      }
+      .push-meta{ flex:1 1 auto; min-width:0; }
+      .push-label{ font-size:14px; font-weight:700; }
+      .push-sub{ font-size:12.5px; color:var(--muted); margin-top:1px; line-height:1.45; }
+      .push-note{ font-size:12px; color:var(--amber); margin-top:4px; line-height:1.45; }
+      .push-switch{ position:relative; flex:0 0 auto; display:inline-block; cursor:pointer; }
+      .push-switch input{ position:absolute; opacity:0; width:0; height:0; }
+      .push-track{
+        display:block; width:46px; height:26px; border-radius:999px;
+        background:rgba(154,163,199,.30); transition:background .2s ease;
+        position:relative;
+      }
+      .push-knob{
+        position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%;
+        background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.4); transition:left .2s ease;
+      }
+      .push-switch input:checked + .push-track{ background:var(--gold); }
+      .push-switch input:checked + .push-track .push-knob{ left:23px; }
+      .push-switch input:focus-visible + .push-track{ outline:2px solid var(--gold-bright); outline-offset:2px; }
+      .push-switch input:disabled + .push-track{ opacity:.45; }
+
       main{ max-width:820px; margin:0 auto; padding:18px 16px 48px; }
 
       /* ---------- PIN gate ---------- */
@@ -474,6 +544,30 @@
           <div class="wordmark">TRYBNETWORK</div>
           <div class="sub">Admin Panel</div>
         </div>
+        <div class="notif-wrap" id="notifWrap" hidden>
+          <button class="notif-bell" type="button" id="notifBell" aria-label="Notifications" aria-haspopup="true" aria-expanded="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            <span class="notif-badge" id="notifBadge" hidden>0</span>
+          </button>
+          <div class="notif-drop" id="notifDrop" hidden>
+            <div class="notif-head">
+              <span>Notifications</span>
+              <button class="notif-clear" type="button" id="notifMarkRead">Mark all read</button>
+            </div>
+            <div class="push-row">
+              <div class="push-meta">
+                <div class="push-label">Phone alerts</div>
+                <div class="push-sub">Push for deposits, withdrawals, bids and new users — even when this panel is closed.</div>
+                <div class="push-note" id="pushNote" hidden></div>
+              </div>
+              <label class="push-switch" aria-label="Phone alerts">
+                <input type="checkbox" id="pushToggle">
+                <span class="push-track"><span class="push-knob"></span></span>
+              </label>
+            </div>
+            <div class="notif-list" id="notifList"></div>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -617,7 +711,7 @@
 
         <section class="danger" aria-label="Reset data">
           <h2>Reset Data</h2>
-          <p>Clear history removes only processed deposit/withdrawal requests and settled bids — accounts, balances, and pending items stay untouched. Reset clears all data — registered accounts, balances, requests, referrals, and trade history — for both this panel and the TrybNetwork Admin app on this device.</p>
+          <p>Clear history removes only processed deposit/withdrawal requests, settled bids, and login session records — accounts, balances, and pending items stay untouched. Reset clears all data — registered accounts, balances, requests, referrals, and trade history — for both this panel and the TrybNetwork Admin app on this device.</p>
           <div class="danger-btns">
             <button class="btn-clear" type="button" id="clearHistoryBtn">Clear history</button>
             <button class="btn-reset" type="button" id="resetBtn">Reset data</button>
@@ -2058,6 +2152,7 @@
         var le = $("loginErr"); if (le) le.textContent = "";
         $("gate").hidden = true;
         $("panelRoot").hidden = false;
+        var notifWrapOn = $("notifWrap"); if (notifWrapOn) notifWrapOn.hidden = false;
         renderAll();
         toast("Welcome, Admin", "You can now manage requests and watch Long vs Short sentiment.");
         refresh().then(function(ok){
@@ -2066,6 +2161,7 @@
         });
         loadSettlementMode();
         startRealtime();
+        try { adminPushRefreshState(); } catch(e){ /* phone push is optional */ }
       }
       $("signOutBtn").addEventListener("click", function(){ lock(); });
       function lock(){
@@ -2073,6 +2169,8 @@
         if (sb) sb.auth.signOut();
         $("panelRoot").hidden = true;
         $("gate").hidden = false;
+        var notifWrapOff = $("notifWrap"); if (notifWrapOff) notifWrapOff.hidden = true;
+        var notifDropOff = $("notifDrop"); if (notifDropOff) notifDropOff.hidden = true;
         // Reset the gate to the login step.
         $("pinStep").hidden = true;
         $("adminLoginForm").hidden = false;
@@ -2331,25 +2429,319 @@
         btn.classList.remove("confirm");
         btn.textContent = "Clear history";
         if (!sb){ backendDown(); return; }
-        // History only: processed requests (approved / rejected) and
-        // settled bids (won / lost). Pending rows, profiles, wallets,
-        // balances, miners, and referrals are never touched.
+        // History only: processed requests (approved / rejected),
+        // settled bids (won / lost), and all login session records.
+        // Pending rows, profiles, wallets, balances, miners, and
+        // referrals are never touched.
         var reqCount = DB.requests.filter(function(r){ return r.status === "approved" || r.status === "rejected"; }).length;
         var bidCount = DB.bids.filter(function(b){ return b.status === "won" || b.status === "lost"; }).length;
+        var sesCount = (DB.sessions || []).length;
         Promise.all([
           sb.from("tn_requests").delete().in("status", ["approved", "rejected"]),
-          sb.from("tn_bids").delete().in("status", ["won", "lost"])
+          sb.from("tn_bids").delete().in("status", ["won", "lost"]),
+          sb.from("tn_login_sessions").delete().not("id", "is", null)
         ]).then(function(res){
           for (var i = 0; i < res.length; i++){ if (res[i].error) throw res[i].error; }
           toast("History cleared",
-            reqCount + " processed request" + (reqCount === 1 ? "" : "s") + " and " +
-            bidCount + " settled bid" + (bidCount === 1 ? "" : "s") +
+            reqCount + " processed request" + (reqCount === 1 ? "" : "s") + ", " +
+            bidCount + " settled bid" + (bidCount === 1 ? "" : "s") + ", and " +
+            sesCount + " login session" + (sesCount === 1 ? "" : "s") +
             " removed. Pending items, balances, and accounts were left untouched.");
         }).catch(function(err){
           if (window.console) console.warn("TrybNetwork admin: clear history failed", err);
           toast("Clear failed", "The database did not accept that change. The panel has been refreshed.", "err");
         }).then(function(){ refresh(); });
       });
+
+      /* ---------------- admin notifications ---------------- */
+      // Live, in-panel notification feed: new deposit/withdrawal
+      // requests, new bids, and new signups, captured from Realtime
+      // INSERT events while the panel is open (nothing is backfilled).
+      // The feed and its read state persist in localStorage on this
+      // device only. Everything here is best-effort and guarded — if
+      // storage or Realtime is unavailable, the panel works as before.
+      var NOTIF_KEY = "tn_admin_notifs_v1";
+      var NOTIF_CAP = 50;
+      var notifFeed = [];
+      var notifStarted = false;
+
+      function notifLoad(){
+        try {
+          var raw = window.localStorage.getItem(NOTIF_KEY);
+          var arr = raw ? JSON.parse(raw) : [];
+          if (Array.isArray(arr)){
+            notifFeed = arr.filter(function(n){ return n && typeof n.text === "string"; }).slice(0, NOTIF_CAP);
+          }
+        } catch(e){ notifFeed = []; }
+      }
+      function notifSave(){
+        try { window.localStorage.setItem(NOTIF_KEY, JSON.stringify(notifFeed.slice(0, NOTIF_CAP))); } catch(e){ /* storage full/blocked — feed stays in memory */ }
+      }
+      function notifUserLabel(userId){
+        var p = userId ? profileById[userId] : null;
+        if (p) return (p.full_name || "User") + (p.username ? " (@" + p.username + ")" : "");
+        if (userId) return "User " + String(userId).slice(0, 8);
+        return "A user";
+      }
+      function notifRender(){
+        var badge = $("notifBadge");
+        var list = $("notifList");
+        var unread = 0;
+        notifFeed.forEach(function(n){ if (!n.read) unread++; });
+        if (badge){
+          badge.textContent = unread > 99 ? "99+" : String(unread);
+          badge.hidden = unread === 0;
+        }
+        if (!list) return;
+        if (!notifFeed.length){
+          list.innerHTML = '<div class="notif-empty">No notifications yet. New requests, bids, and signups will appear here while the panel is open.</div>';
+          return;
+        }
+        list.innerHTML = notifFeed.map(function(n){
+          return '<div class="notif-item' + (n.read ? "" : " unread") + '">' +
+            '<div class="notif-text">' + esc(n.text) + "</div>" +
+            (n.sub ? '<div class="notif-sub">' + esc(n.sub) + "</div>" : "") +
+            '<div class="notif-time">' + esc(fmtTime(n.ts)) + "</div></div>";
+        }).join("");
+      }
+      function notifMarkAllRead(){
+        var changed = false;
+        notifFeed.forEach(function(n){ if (!n.read){ n.read = true; changed = true; } });
+        if (changed) notifSave();
+        notifRender();
+      }
+      function notifSetOpen(open){
+        var drop = $("notifDrop");
+        var bell = $("notifBell");
+        if (!drop) return;
+        drop.hidden = !open;
+        if (bell) bell.setAttribute("aria-expanded", open ? "true" : "false");
+        if (open) notifMarkAllRead();
+      }
+      function notifPush(text, sub){
+        var drop = $("notifDrop");
+        var seenNow = !!(drop && !drop.hidden);
+        notifFeed.unshift({
+          id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+          text: text, sub: sub || "", ts: new Date().toISOString(), read: seenNow
+        });
+        if (notifFeed.length > NOTIF_CAP) notifFeed.length = NOTIF_CAP;
+        notifSave();
+        notifRender();
+        try { toast(text, sub || undefined); } catch(e){ /* toast is decorative here */ }
+      }
+      function notifOnRequest(row){
+        if (!row) return;
+        var label;
+        if (row.type === "deposit") label = "New deposit request — " + fmtUSD(row.amount);
+        else if (row.type === "withdrawal") label = "New withdrawal request — " + fmtUSD(row.amount);
+        else label = "New " + (row.type || "request") + " request — " + fmtUSD(row.amount);
+        notifPush(label, notifUserLabel(row.user_id));
+      }
+      function notifOnBid(row){
+        if (!row) return;
+        var dir = row.direction === "high" ? "High" : (row.direction === "low" ? "Low" : String(row.direction || ""));
+        notifPush("New bid — " + (row.asset || "asset") + (dir ? " " + dir : "") + " " + fmtUSD(row.stake),
+          notifUserLabel(row.user_id));
+      }
+      function notifOnProfile(row){
+        if (!row) return;
+        notifPush("New user joined — " + (row.full_name || "New user") + (row.username ? " (@" + row.username + ")" : ""),
+          row.email || "");
+      }
+      function startNotifRealtime(){
+        if (!sb || notifStarted) return;
+        notifStarted = true;
+        try {
+          sb.channel("tn-admin-notif-requests")
+            .on("postgres_changes", { event: "INSERT", schema: "public", table: "tn_requests" }, function(payload){ notifOnRequest(payload && payload.new); })
+            .subscribe();
+        } catch(e){ /* best-effort */ }
+        try {
+          sb.channel("tn-admin-notif-bids")
+            .on("postgres_changes", { event: "INSERT", schema: "public", table: "tn_bids" }, function(payload){ notifOnBid(payload && payload.new); })
+            .subscribe();
+        } catch(e){ /* best-effort */ }
+        try {
+          sb.channel("tn-admin-notif-profiles")
+            .on("postgres_changes", { event: "INSERT", schema: "public", table: "tn_profiles" }, function(payload){ notifOnProfile(payload && payload.new); })
+            .subscribe();
+        } catch(e){ /* best-effort */ }
+      }
+      try {
+        notifLoad();
+        notifRender();
+        var notifBellEl = $("notifBell");
+        if (notifBellEl) notifBellEl.addEventListener("click", function(){
+          var drop = $("notifDrop");
+          notifSetOpen(!!(drop && drop.hidden));
+        });
+        var notifMarkEl = $("notifMarkRead");
+        if (notifMarkEl) notifMarkEl.addEventListener("click", function(){ notifMarkAllRead(); });
+        document.addEventListener("click", function(ev){
+          var wrap = $("notifWrap");
+          var drop = $("notifDrop");
+          if (!wrap || !drop || drop.hidden) return;
+          if (ev.target && wrap.contains(ev.target)) return;
+          notifSetOpen(false);
+        });
+      } catch(e){ /* notification UI is optional — never break panel load */ }
+
+      /* ---------------- admin phone push ---------------- */
+      // Opt-in Web Push for admin alerts: when on, THIS browser gets a
+      // phone push for every new deposit/withdrawal request, bid, and
+      // signup — including while the panel is closed. Subscriptions are
+      // stored server-side via the admin-gated RPCs tn_admin_save_push_sub
+      // / tn_admin_drop_push_sub (rows in tn_admin_push_subs); the
+      // tn-admin-push Edge Function does the sending. Everything here is
+      // defensive: any push failure leaves the rest of the panel untouched.
+      var ADMIN_VAPID_PUBLIC_KEY = "BAkrwpkZFBnyxffSVar56VqCqbx19QLEPOHlN7rtl6VsCKVfsoG8sl_ObA5gJcTSCKufFDoiSrkdPWAKtB_wB3Y";
+      var pushBusy = false;
+
+      function pushSupported(){
+        try {
+          return ("serviceWorker" in navigator) && ("PushManager" in window) && ("Notification" in window);
+        } catch(e){ return false; }
+      }
+      function pushKeyBytes(b64){
+        var pad = "=".repeat((4 - (b64.length % 4)) % 4);
+        var raw = window.atob((b64 + pad).replace(/-/g, "+").replace(/_/g, "/"));
+        var out = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+        return out;
+      }
+      function pushNote(text){
+        var n = $("pushNote");
+        if (!n) return;
+        if (text){ n.textContent = text; n.hidden = false; }
+        else { n.textContent = ""; n.hidden = true; }
+      }
+      function pushGetReg(){
+        // Idempotent: registering the same script/scope returns the
+        // existing registration. Scope './' keeps it at the repo root,
+        // next to index.html, where sw.js lives.
+        return navigator.serviceWorker.register("sw.js", { scope: "./" });
+      }
+      function adminPushRefreshState(){
+        try {
+          var t = $("pushToggle");
+          if (!t) return;
+          if (!pushSupported()){
+            t.checked = false;
+            t.disabled = true;
+            pushNote("Push isn't supported in this browser.");
+            return;
+          }
+          if (window.Notification && Notification.permission === "denied"){
+            t.checked = false;
+            t.disabled = true;
+            pushNote("Notifications are blocked for this site — allow them in your browser settings, then reopen this panel.");
+            return;
+          }
+          t.disabled = false;
+          pushNote("");
+          pushGetReg().then(function(reg){
+            if (!reg || !reg.pushManager) return null;
+            return reg.pushManager.getSubscription();
+          }).then(function(sub){
+            var t2 = $("pushToggle");
+            if (t2 && !pushBusy) t2.checked = !!sub;
+          }).catch(function(){ /* leave the switch as-is */ });
+        } catch(e){ /* phone push is optional — never break the panel */ }
+      }
+      function adminPushEnable(){
+        if (pushBusy) return;
+        var t = $("pushToggle");
+        if (!sb){
+          try { toast("Phone alerts unavailable", "The backend connection isn't ready yet. Try again in a moment.", "err"); } catch(e){}
+          adminPushRefreshState();
+          return;
+        }
+        pushBusy = true;
+        if (t) t.disabled = true;
+        pushGetReg().then(function(reg){
+          var permResult;
+          try { permResult = Notification.requestPermission(); } catch(e){ permResult = null; }
+          var permPromise = (permResult && typeof permResult.then === "function")
+            ? permResult
+            : Promise.resolve(window.Notification ? Notification.permission : "denied");
+          return permPromise.then(function(perm){
+            if (perm !== "granted") throw new Error("permission_not_granted");
+            return reg.pushManager.getSubscription().then(function(existing){
+              if (existing) return existing;
+              return reg.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: pushKeyBytes(ADMIN_VAPID_PUBLIC_KEY)
+              });
+            });
+          });
+        }).then(function(sub){
+          var j = (sub && typeof sub.toJSON === "function") ? sub.toJSON() : null;
+          if (!j || !j.endpoint || !j.keys || !j.keys.p256dh || !j.keys.auth)
+            throw new Error("bad_subscription");
+          return sb.rpc("tn_admin_save_push_sub", {
+            p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth
+          }).then(function(res){
+            if (res && res.error) throw res.error;
+            if (res && res.data && res.data.ok === false) throw new Error("save_rejected");
+          });
+        }).then(function(){
+          pushBusy = false;
+          try { toast("Phone alerts on", "You'll now get a push for deposits, withdrawals, bids and new users — even when this panel is closed."); } catch(e){}
+          adminPushRefreshState();
+        }).catch(function(err){
+          pushBusy = false;
+          if (window.console) console.warn("TrybNetwork admin: phone push enable failed", err);
+          try {
+            if (err && err.message === "permission_not_granted")
+              toast("Phone alerts not enabled", "Notification permission wasn't granted.", "err");
+            else
+              toast("Phone alerts failed", "Couldn't turn phone alerts on — please try again.", "err");
+          } catch(e){}
+          adminPushRefreshState();
+        });
+      }
+      function adminPushDisable(){
+        if (pushBusy) return;
+        var t = $("pushToggle");
+        pushBusy = true;
+        if (t) t.disabled = true;
+        var endpoint = null;
+        pushGetReg().then(function(reg){
+          if (!reg || !reg.pushManager) return null;
+          return reg.pushManager.getSubscription();
+        }).then(function(sub){
+          if (!sub) return null;
+          endpoint = sub.endpoint;
+          return sub.unsubscribe().then(function(){ return null; }, function(){ return null; });
+        }).then(function(){
+          if (endpoint && sb){
+            return sb.rpc("tn_admin_drop_push_sub", { p_endpoint: endpoint }).then(function(res){
+              if (res && res.error && window.console)
+                console.warn("TrybNetwork admin: push drop RPC failed", res.error);
+            }, function(){ /* local unsubscribe already done */ });
+          }
+          return null;
+        }).then(function(){
+          pushBusy = false;
+          try { toast("Phone alerts off", "This browser will no longer get admin pushes."); } catch(e){}
+          adminPushRefreshState();
+        }).catch(function(err){
+          pushBusy = false;
+          if (window.console) console.warn("TrybNetwork admin: phone push disable failed", err);
+          try { toast("Phone alerts", "Couldn't fully turn phone alerts off — please try again.", "err"); } catch(e){}
+          adminPushRefreshState();
+        });
+      }
+      try {
+        var pushToggleEl = $("pushToggle");
+        if (pushToggleEl) pushToggleEl.addEventListener("change", function(){
+          try {
+            if (pushToggleEl.checked) adminPushEnable();
+            else adminPushDisable();
+          } catch(e){ adminPushRefreshState(); }
+        });
+      } catch(e){ /* phone push is optional — never break panel load */ }
 
       /* ---------------- live sync ---------------- */
       // Realtime subscriptions push changes from any device; a 15-second
@@ -2358,6 +2750,7 @@
       function startRealtime(){
         if (!sb || realtimeStarted) return;
         realtimeStarted = true;
+        try { startNotifRealtime(); } catch(e){ /* notifications are best-effort */ }
         ["tn_requests", "tn_bids", "tn_wallets", "tn_miners", "tn_plays", "tn_login_sessions"].forEach(function(t){
           try {
             sb.channel("tn-admin-" + t)
