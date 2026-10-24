@@ -200,6 +200,8 @@
         display:flex; align-items:center; justify-content:center;
         font-weight:800; font-size:14px; letter-spacing:.5px;
       }
+      .avatar-wrap{ position:relative; display:inline-flex; flex:0 0 auto; }
+      .flag-badge{ position:absolute; top:-4px; right:-4px; width:16px; height:16px; background:#fff; border-radius:50%; display:grid; place-items:center; font-size:10.5px; line-height:1; box-shadow:0 1px 4px rgba(11,17,50,.35); pointer-events:none; z-index:2; }
       .u-main{ flex:1 1 auto; min-width:0; }
       .u-name{ font-weight:700; font-size:15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .u-sub{ color:var(--muted); font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
@@ -1730,6 +1732,13 @@
         if (!code) return "Country not set (treated as Nigeria)";
         return "Country " + (COUNTRY_LABELS[code] || code);
       }
+      function countryFlag(code){
+        code = String(code || "").toUpperCase() || "NG";
+        var lbl = COUNTRY_LABELS[code];
+        if (lbl) return lbl.split(" ")[0];
+        if (/^[A-Z]{2}$/.test(code)) return String.fromCodePoint(127397 + code.charCodeAt(0), 127397 + code.charCodeAt(1));
+        return "🇳🇬";
+      }
       function userRowHtml(p){
           var w = walletOf(p.id);
           var pend = DB.requests.filter(function(r){ return r.user_id === p.id && r.status === "pending"; }).length;
@@ -1760,7 +1769,7 @@
               '<span class="miner-status ' + (anyRunning ? "running" : "idle") + '">' + (anyRunning ? "Running" : "Idle") + "</span>"
             : "<br>No miner";
           return '<div class="user-row">' +
-            '<span class="avatar">' + esc(avatarInitials(p.full_name || p.username)) + "</span>" +
+            '<span class="avatar-wrap"><span class="avatar">' + esc(avatarInitials(p.full_name || p.username)) + '</span><span class="flag-badge">' + countryFlag(p.country) + "</span></span>" +
             '<div class="u-main"><div class="u-name">' + esc(p.full_name || p.username) +
               (pend ? '<span class="pend-tag">' + pend + " pending</span>" : "") +
               (refCount >= 3 ? '<span class="review-tag">Review</span>' : "") +
