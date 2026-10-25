@@ -702,11 +702,11 @@
 
         <section class="panel" aria-label="Visitors">
           <h2>Visitors</h2>
-          <p class="sec-sub">Everyone who opens any TrybNetwork product — no login needed. Newest first, updates live.</p>
+          <p class="sec-sub">Everyone who lands on any TrybNetwork product — no login needed. One record per IP + page; repeat landings count as hits. Most recently seen first, updates live.</p>
           <div class="stats v3">
-            <div class="stat"><div class="v" id="visitToday">—</div><div class="k">Visits today</div></div>
-            <div class="stat"><div class="v" id="visitUniqueToday">—</div><div class="k">Unique today</div></div>
-            <div class="stat"><div class="v" id="visitTotal">—</div><div class="k">Total visits</div></div>
+            <div class="stat"><div class="v" id="visitLandings">—</div><div class="k">Landings</div></div>
+            <div class="stat"><div class="v" id="visitUniqueRows">—</div><div class="k">Unique IP + page</div></div>
+            <div class="stat"><div class="v" id="visitActiveToday">—</div><div class="k">Active today</div></div>
           </div>
           <div id="visitList"></div>
         </section>
@@ -725,7 +725,7 @@
 
         <section class="danger" aria-label="Reset data">
           <h2>Reset Data</h2>
-          <p>Clear history removes only processed deposit/withdrawal requests, settled bids, processed TrybCoin requests, and login session records — accounts, balances, and pending items stay untouched. Reset clears all data — registered accounts, balances, requests, referrals, and trade history — for both this panel and the TrybNetwork Admin app on this device.</p>
+          <p>Clear history removes only processed deposit/withdrawal requests, settled bids, processed TrybCoin requests, login session records, and visitor logs — accounts, balances, and pending items stay untouched. Reset clears all data — registered accounts, balances, requests, referrals, and trade history — for both this panel and the TrybNetwork Admin app on this device.</p>
           <div class="danger-btns">
             <button class="btn-clear" type="button" id="clearHistoryBtn">Clear history</button>
             <button class="btn-reset" type="button" id="resetBtn">Reset data</button>
@@ -811,10 +811,10 @@
         playsOk: false,      // false until tn_plays answers — Game P&L
                              // shows "no data yet" for its games until then
         sessions: [],        // tn_login_sessions rows, newest first
-        visits: [],          // tn_visits rows, newest first (latest 100)
-        visitsTotal: 0,      // all-time tn_visits count
-        visitsToday: 0,      // tn_visits count since local midnight
-        visitsUniqueToday: 0 // distinct visitor_id count today
+        visits: [],          // tn_visits rows, most recently seen first (latest 100)
+        visitsTotal: 0,      // tn_visits row count (unique IP + page records)
+        visitsLandings: 0,   // SUM(hits) across all tn_visits rows
+        visitsActiveToday: 0 // rows with last_seen_at since local midnight
       };
       var profileById = {};
       function reindex(){
@@ -908,7 +908,7 @@
         // tn_visits is read tolerantly too: until the migration runs, the
         // Visitors section simply reads empty with zeroed stats.
         var visitsQuery = sb.from("tn_visits")
-          .select("*").order("created_at", { ascending: false }).limit(100).then(
+          .select("*").order("last_seen_at", { ascending: false }).limit(100).then(
             function(r){ return r && r.error ? { data: [] } : r; },
             function(){ return { data: [] }; }
           );
@@ -920,23 +920,19 @@
         };
         var startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
         var todayISO = startOfToday.toISOString();
-        var visitsTotalQuery = visitCount(
-          sb.from("tn_visits").select("id", { count: "exact", head: true }));
-        var visitsTodayQuery = visitCount(
-          sb.from("tn_visits").select("id", { count: "exact", head: true }).gte("created_at", todayISO));
-        var visitsUniqueQuery = sb.from("tn_visits").select("visitor_id")
-          .gte("created_at", todayISO).limit(5000).then(
-            function(r){
-              if (!r || r.error) return { data: [], unique: 0 };
-              var seen = {}, n = 0;
-              (r.data || []).forEach(function(row){
-                var v = row && row.visitor_id;
-                if (v && !seen[v]){ seen[v] = 1; n++; }
-              });
-              return { data: [], unique: n };
-            },
-            function(){ return { data: [], unique: 0 }; }
-          );
+        // One tolerant pass over the hits column gives both stats:
+        // Landings = SUM(hits), Unique IP + page = the row count itself.
+        var visitsHitsQuery = sb.from("tn_visits").select("hits").limit(20000).then(
+          function(r){
+            if (!r || r.error) return { landings: 0, rows: 0 };
+            var sum = 0;
+            (r.data || []).forEach(function(row){ sum += (row && row.hits) || 1; });
+            return { landings: sum, rows: (r.data || []).length };
+          },
+          function(){ return { landings: 0, rows: 0 }; }
+        );
+        var visitsActiveQuery = visitCount(
+          sb.from("tn_visits").select("id", { count: "exact", head: true }).gte("last_seen_at", todayISO));
         return Promise.all([
           sb.from("tn_profiles").select("*").order("created_at", { ascending: true }),
           sb.from("tn_wallets").select("*"),
@@ -948,9 +944,8 @@
           playsQuery,
           sessionsQuery,
           visitsQuery,
-          visitsTotalQuery,
-          visitsTodayQuery,
-          visitsUniqueQuery
+          visitsHitsQuery,
+          visitsActiveQuery
         ]).then(function(res){
           for (var i = 0; i < res.length; i++){
             if (res[i].error) throw res[i].error;
@@ -970,9 +965,9 @@
           DB.plays = res[7].data || [];
           DB.sessions = (res[8] && res[8].data) || [];
           DB.visits = (res[9] && res[9].data) || [];
-          DB.visitsTotal = (res[10] && res[10].count) || 0;
-          DB.visitsToday = (res[11] && res[11].count) || 0;
-          DB.visitsUniqueToday = (res[12] && res[12].unique) || 0;
+          DB.visitsLandings = (res[10] && res[10].landings) || 0;
+          DB.visitsTotal = (res[10] && res[10].rows) || 0;
+          DB.visitsActiveToday = (res[11] && res[11].count) || 0;
           reindex();
           return true;
         }).catch(function(err){
@@ -1004,6 +999,12 @@
         if (isNaN(d.getTime())) return "—";
         return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) + ", " +
                d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+      }
+      function fmtClock(ts){
+        if (ts == null || ts === "") return "—";
+        var d = new Date(ts);
+        if (isNaN(d.getTime())) return "—";
+        return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
       }
       function avatarInitials(name){
         var parts = String(name || "").trim().split(/\s+/).filter(Boolean);
@@ -2004,14 +2005,14 @@
       function renderVisits(){
         var box = $("visitList");
         if (!box) return;
-        var tEl = $("visitToday"), uEl = $("visitUniqueToday"), ttEl = $("visitTotal");
-        if (tEl) tEl.textContent = (DB.visitsToday || 0).toLocaleString("en-US");
-        if (uEl) uEl.textContent = (DB.visitsUniqueToday || 0).toLocaleString("en-US");
-        if (ttEl) ttEl.textContent = (DB.visitsTotal || 0).toLocaleString("en-US");
+        var lEl = $("visitLandings"), uEl = $("visitUniqueRows"), aEl = $("visitActiveToday");
+        if (lEl) lEl.textContent = (DB.visitsLandings || 0).toLocaleString("en-US");
+        if (uEl) uEl.textContent = (DB.visitsTotal || 0).toLocaleString("en-US");
+        if (aEl) aEl.textContent = (DB.visitsActiveToday || 0).toLocaleString("en-US");
         var rows = (DB.visits || []).slice(0, 100);
         if (!rows.length){
           box.innerHTML = '<div class="empty"><b>No visits yet</b>' +
-            "Visits appear here as soon as anyone opens any TrybNetwork product.</div>";
+            "Visits appear here as soon as anyone lands on any TrybNetwork product.</div>";
           return;
         }
         box.innerHTML = rows.map(function(v){
@@ -2023,12 +2024,15 @@
           var country = v.country_code
             ? countryFlag(v.country_code) + " " + esc(v.country_name || v.country_code)
             : "🌍 Unknown country";
+          var hits = (v.hits && v.hits > 1) ? " · ×" + v.hits : "";
           return '<div class="req-item"><div class="req-top">' +
             '<span class="req-user">' + country + "</span>" +
             '<span class="req-method visit-site">' + esc(VISIT_SITE_LABELS[v.site] || v.site || "—") + "</span></div>" +
-            '<div class="req-meta">' + fmtTime(v.created_at) + " · " + esc(v.device || "Unknown device") +
-              " · " + esc(v.ip || "IP unknown") + " · " + who +
-              (v.path ? " · " + esc(v.path) : "") + "</div></div>";
+            '<div class="req-meta">' + (v.path ? esc(v.path) + " · " : "") +
+              esc(v.ip || "IP unknown") + " · " + esc(v.device || "Unknown device") +
+              " · " + who + hits + "</div>" +
+            '<div class="req-meta">first ' + fmtTime(v.created_at) +
+              " · last " + fmtClock(v.last_seen_at || v.created_at) + "</div></div>";
         }).join("");
       }
       function requestRow(r){
@@ -2521,25 +2525,29 @@
         if (!sb){ backendDown(); return; }
         // History only: processed requests (approved / rejected),
         // settled bids (won / lost), processed coin requests
-        // (anything not pending), and all login session records.
+        // (anything not pending), all login session records, and
+        // all visitor logs.
         // Pending rows, profiles, wallets, balances, miners, and
         // referrals are never touched.
         var reqCount = DB.requests.filter(function(r){ return r.status === "approved" || r.status === "rejected"; }).length;
         var bidCount = DB.bids.filter(function(b){ return b.status === "won" || b.status === "lost"; }).length;
         var coinCount = (DB.coinRequests || []).filter(function(r){ return r.status !== "pending"; }).length;
         var sesCount = (DB.sessions || []).length;
+        var visCount = DB.visitsTotal || 0;
         Promise.all([
           sb.from("tn_requests").delete().in("status", ["approved", "rejected"]),
           sb.from("tn_bids").delete().in("status", ["won", "lost"]),
           sb.from("tn_coin_requests").delete().neq("status", "pending"),
-          sb.from("tn_login_sessions").delete().not("id", "is", null)
+          sb.from("tn_login_sessions").delete().not("id", "is", null),
+          sb.from("tn_visits").delete().not("id", "is", null)
         ]).then(function(res){
           for (var i = 0; i < res.length; i++){ if (res[i].error) throw res[i].error; }
           toast("History cleared",
             reqCount + " processed request" + (reqCount === 1 ? "" : "s") + ", " +
             bidCount + " settled bid" + (bidCount === 1 ? "" : "s") + ", " +
-            coinCount + " processed TrybCoin request" + (coinCount === 1 ? "" : "s") + ", and " +
-            sesCount + " login session" + (sesCount === 1 ? "" : "s") +
+            coinCount + " processed TrybCoin request" + (coinCount === 1 ? "" : "s") + ", " +
+            sesCount + " login session" + (sesCount === 1 ? "" : "s") + ", and " +
+            visCount + " visitor log" + (visCount === 1 ? "" : "s") +
             " removed. Pending items, balances, and accounts were left untouched.");
         }).catch(function(err){
           if (window.console) console.warn("TrybNetwork admin: clear history failed", err);
