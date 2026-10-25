@@ -352,6 +352,8 @@
       .req-amt{ font-size:19px; font-weight:800; margin:8px 0 2px; }
       .req-amt small{ font-size:12px; color:var(--muted); font-weight:600; }
       .req-meta{ color:var(--muted); font-size:12.5px; line-height:1.55; }
+      .stats.v3{ grid-template-columns:repeat(3, 1fr); }
+      .visit-site{ margin-left:auto; }
       .req-receipt{
         display:inline-flex; align-items:center; gap:10px; margin-top:10px;
         text-decoration:none; color:var(--gold-bright); font-size:12.5px; font-weight:700;
@@ -698,6 +700,17 @@
           <div id="sessList"></div>
         </section>
 
+        <section class="panel" aria-label="Visitors">
+          <h2>Visitors</h2>
+          <p class="sec-sub">Everyone who opens any TrybNetwork product — no login needed. Newest first, updates live.</p>
+          <div class="stats v3">
+            <div class="stat"><div class="v" id="visitToday">—</div><div class="k">Visits today</div></div>
+            <div class="stat"><div class="v" id="visitUniqueToday">—</div><div class="k">Unique today</div></div>
+            <div class="stat"><div class="v" id="visitTotal">—</div><div class="k">Total visits</div></div>
+          </div>
+          <div id="visitList"></div>
+        </section>
+
         <section class="panel" aria-label="Market sentiment">
           <h2>Market Sentiment</h2>
           <p class="sec-sub">Traders positioned Long vs Short on each asset across the platform.</p>
@@ -797,7 +810,11 @@
         plays: [],           // tn_plays rows (casino games)
         playsOk: false,      // false until tn_plays answers — Game P&L
                              // shows "no data yet" for its games until then
-        sessions: []         // tn_login_sessions rows, newest first
+        sessions: [],        // tn_login_sessions rows, newest first
+        visits: [],          // tn_visits rows, newest first (latest 100)
+        visitsTotal: 0,      // all-time tn_visits count
+        visitsToday: 0,      // tn_visits count since local midnight
+        visitsUniqueToday: 0 // distinct visitor_id count today
       };
       var profileById = {};
       function reindex(){
@@ -888,6 +905,38 @@
             function(r){ return r && r.error ? { data: [] } : r; },
             function(){ return { data: [] }; }
           );
+        // tn_visits is read tolerantly too: until the migration runs, the
+        // Visitors section simply reads empty with zeroed stats.
+        var visitsQuery = sb.from("tn_visits")
+          .select("*").order("created_at", { ascending: false }).limit(100).then(
+            function(r){ return r && r.error ? { data: [] } : r; },
+            function(){ return { data: [] }; }
+          );
+        var visitCount = function(q){
+          return q.then(
+            function(r){ return { count: (r && !r.error && typeof r.count === "number") ? r.count : 0 }; },
+            function(){ return { count: 0 }; }
+          );
+        };
+        var startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+        var todayISO = startOfToday.toISOString();
+        var visitsTotalQuery = visitCount(
+          sb.from("tn_visits").select("id", { count: "exact", head: true }));
+        var visitsTodayQuery = visitCount(
+          sb.from("tn_visits").select("id", { count: "exact", head: true }).gte("created_at", todayISO));
+        var visitsUniqueQuery = sb.from("tn_visits").select("visitor_id")
+          .gte("created_at", todayISO).limit(5000).then(
+            function(r){
+              if (!r || r.error) return { data: [], unique: 0 };
+              var seen = {}, n = 0;
+              (r.data || []).forEach(function(row){
+                var v = row && row.visitor_id;
+                if (v && !seen[v]){ seen[v] = 1; n++; }
+              });
+              return { data: [], unique: n };
+            },
+            function(){ return { data: [], unique: 0 }; }
+          );
         return Promise.all([
           sb.from("tn_profiles").select("*").order("created_at", { ascending: true }),
           sb.from("tn_wallets").select("*"),
@@ -897,7 +946,11 @@
           sb.from("tn_bids").select("*").order("created_at", { ascending: false }),
           sb.from("tn_referrals").select("*"),
           playsQuery,
-          sessionsQuery
+          sessionsQuery,
+          visitsQuery,
+          visitsTotalQuery,
+          visitsTodayQuery,
+          visitsUniqueQuery
         ]).then(function(res){
           for (var i = 0; i < res.length; i++){
             if (res[i].error) throw res[i].error;
@@ -916,6 +969,10 @@
           DB.referrals = res[6].data || [];
           DB.plays = res[7].data || [];
           DB.sessions = (res[8] && res[8].data) || [];
+          DB.visits = (res[9] && res[9].data) || [];
+          DB.visitsTotal = (res[10] && res[10].count) || 0;
+          DB.visitsToday = (res[11] && res[11].count) || 0;
+          DB.visitsUniqueToday = (res[12] && res[12].unique) || 0;
           reindex();
           return true;
         }).catch(function(err){
@@ -1943,6 +2000,37 @@
             '<div class="req-meta">' + fmtTime(s.created_at) + " · " + esc(deviceLabel(s.device)) + "</div></div>";
         }).join("");
       }
+      var VISIT_SITE_LABELS = { landing: "Landing", app: "App", tgapp: "Mini App", chat: "TrybChat", news: "TrybNews", mart: "TrybMart" };
+      function renderVisits(){
+        var box = $("visitList");
+        if (!box) return;
+        var tEl = $("visitToday"), uEl = $("visitUniqueToday"), ttEl = $("visitTotal");
+        if (tEl) tEl.textContent = (DB.visitsToday || 0).toLocaleString("en-US");
+        if (uEl) uEl.textContent = (DB.visitsUniqueToday || 0).toLocaleString("en-US");
+        if (ttEl) ttEl.textContent = (DB.visitsTotal || 0).toLocaleString("en-US");
+        var rows = (DB.visits || []).slice(0, 100);
+        if (!rows.length){
+          box.innerHTML = '<div class="empty"><b>No visits yet</b>' +
+            "Visits appear here as soon as anyone opens any TrybNetwork product.</div>";
+          return;
+        }
+        box.innerHTML = rows.map(function(v){
+          var p = v.user_id ? (profileById[v.user_id] || {}) : {};
+          var who = v.user_id
+            ? esc(p.full_name || p.username || "Signed-in user") +
+              (p.username ? ' <span class="at">@' + esc(p.username) + "</span>" : "")
+            : "Guest";
+          var country = v.country_code
+            ? countryFlag(v.country_code) + " " + esc(v.country_name || v.country_code)
+            : "🌍 Unknown country";
+          return '<div class="req-item"><div class="req-top">' +
+            '<span class="req-user">' + country + "</span>" +
+            '<span class="req-method visit-site">' + esc(VISIT_SITE_LABELS[v.site] || v.site || "—") + "</span></div>" +
+            '<div class="req-meta">' + fmtTime(v.created_at) + " · " + esc(v.device || "Unknown device") +
+              " · " + esc(v.ip || "IP unknown") + " · " + who +
+              (v.path ? " · " + esc(v.path) : "") + "</div></div>";
+        }).join("");
+      }
       function requestRow(r){
         var p = profileById[r.user_id] || {};
         var isDep = r.type === "deposit";
@@ -2142,6 +2230,7 @@
         renderBids();
         renderUsers();
         renderSessions();
+        renderVisits();
         renderSentiment();
       }
 
@@ -2756,7 +2845,7 @@
         if (!sb || realtimeStarted) return;
         realtimeStarted = true;
         try { startNotifRealtime(); } catch(e){ /* notifications are best-effort */ }
-        ["tn_requests", "tn_bids", "tn_wallets", "tn_miners", "tn_plays", "tn_login_sessions"].forEach(function(t){
+        ["tn_requests", "tn_bids", "tn_wallets", "tn_miners", "tn_plays", "tn_login_sessions", "tn_visits"].forEach(function(t){
           try {
             sb.channel("tn-admin-" + t)
               .on("postgres_changes", { event: "*", schema: "public", table: t }, function(){ refresh(); })
