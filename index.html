@@ -654,6 +654,10 @@
           <div class="stat"><div class="v num" id="statMain">$0.00</div><div class="k">Total Main</div></div>
           <div class="stat"><div class="v num" id="statMining">$0.00</div><div class="k">Total Mining</div></div>
         </div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;">
+          <button type="button" id="resetStatsBtn" style="padding:8px 16px;border-radius:8px;border:1px solid #C9A24B;background:#0B1132;color:#fff;font-size:13.5px;cursor:pointer;">Reset stats to zero</button>
+          <span id="statsSinceNote" style="font-size:12.5px;color:#9AA0B5;"></span>
+        </div>
 
         <section class="panel" aria-label="Game profit and loss">
           <h2>Game P&amp;L</h2>
@@ -1721,6 +1725,109 @@
         return { counts: counts, bidsFound: bidsFound };
       }
 
+      /* ---------------- stats baseline (display-only reset) ---------------- */
+      // tn_settings key "stats_baseline" holds the platform totals as of
+      // the last reset. This panel and the team portfolio DISPLAY current
+      // totals minus the baseline, so the panels count from zero at the
+      // reset while user balances, records and miners are never touched.
+      var STATS_BASELINE = null;
+      function baseAdmin(){ return (STATS_BASELINE && STATS_BASELINE.admin) || {}; }
+      function adjAmt(cur, base){
+        var v = round2((Number(cur) || 0) - (Number(base) || 0));
+        return v > 0 ? v : 0;
+      }
+      function renderStatsBaselineNote(){
+        var el = $("statsSinceNote");
+        if (!el) return;
+        if (STATS_BASELINE && STATS_BASELINE.at){
+          var d = new Date(STATS_BASELINE.at);
+          el.textContent = "Counting from zero since " + (isNaN(d.getTime()) ? STATS_BASELINE.at : d.toLocaleString()) +
+            " \u2014 user balances and records are not affected.";
+        } else {
+          el.textContent = "";
+        }
+      }
+      function loadStatsBaseline(){
+        if (!sb) return Promise.resolve();
+        return sb.from("tn_settings").select("value").eq("key", "stats_baseline").maybeSingle()
+          .then(function(res){
+            if (!res.error && res.data && res.data.value){
+              try { STATS_BASELINE = JSON.parse(res.data.value); } catch(e){ STATS_BASELINE = null; }
+            }
+            renderStats();
+            renderGamePL();
+            renderStatsBaselineNote();
+          })
+          .catch(function(){});
+      }
+      function teamBaselineFromDB(totalMain, totalMining, plMap){
+        var invested = 0, withdrawn = 0;
+        DB.requests.forEach(function(r){
+          if (!r || r.status !== "approved") return;
+          if (r.type === "deposit") invested = round2(invested + (Number(r.amount) || 0));
+          if (r.type === "withdrawal") withdrawn = round2(withdrawn + (Number(r.amount) || 0));
+        });
+        var incTrade = 0, binStaked = 0, binPaid = 0;
+        DB.bids.forEach(function(b){
+          if (!b) return;
+          if (b.status === "lost" && (b.stake_source || "main") === "main") incTrade = round2(incTrade + (Number(b.stake) || 0));
+          if (b.status === "won" || b.status === "lost"){
+            binStaked = round2(binStaked + (Number(b.stake) || 0));
+            binPaid = round2(binPaid + (Number(b.payout) || 0));
+          }
+        });
+        var tpl = { binary: { staked: binStaked, paid: binPaid } };
+        ["aviator", "spin", "whot", "ayo"].forEach(function(k){ tpl[k] = { staked: 0, paid: 0 }; });
+        (DB.plays || []).forEach(function(p){
+          if (!p) return;
+          var st = p.status || p.result || "";
+          if (st !== "won" && st !== "lost" && st !== "draw") return;
+          var k = String(p.game || "").toLowerCase();
+          if (!tpl[k]) return;
+          tpl[k].staked = round2(tpl[k].staked + (Number(p.stake) || 0));
+          tpl[k].paid = round2(tpl[k].paid + (Number(p.payout) || 0));
+        });
+        return {
+          balance: totalMain, invested: invested, withdrawn: withdrawn,
+          minerSales: plMap["Mining"] ? plMap["Mining"].staked : 0,
+          minerAccrued: totalMining,
+          incTrade: incTrade, incPvp: 0, pl: tpl
+        };
+      }
+      function resetStatsBaseline(){
+        if (!sb){ toast("Stats reset unavailable", "No database connection.", "err"); return; }
+        if (!confirm("Reset admin + portfolio stats to zero?\n\nThe panels start counting from now. User balances, deposit records, miners and bonuses are NOT changed.")) return;
+        var totalMain = 0, totalMining = 0;
+        DB.profiles.forEach(function(p){
+          totalMain += Number(walletOf(p.id).main_balance) || 0;
+          totalMining += miningBalanceOf(p.id);
+        });
+        totalMain = round2(totalMain); totalMining = round2(totalMining);
+        var plMap = {};
+        gamePLRows().forEach(function(r){ if (r.has) plMap[r.name] = { staked: r.staked, paid: r.paid }; });
+        var team = teamBaselineFromDB(totalMain, totalMining, plMap);
+        var finish = function(incPvp){
+          team.incPvp = round2(incPvp || 0);
+          var payload = { at: new Date().toISOString(), admin: { totalMain: totalMain, totalMining: totalMining, pl: plMap }, team: team };
+          sb.from("tn_settings").upsert({ key: "stats_baseline", value: JSON.stringify(payload) }, { onConflict: "key" })
+            .then(function(res){
+              if (res.error){ toast("Stats reset failed", "The baseline could not be saved.", "err"); return; }
+              STATS_BASELINE = payload;
+              renderStats();
+              renderGamePL();
+              renderStatsBaselineNote();
+              toast("Stats reset", "Admin and portfolio now count from zero. User data untouched.");
+            });
+        };
+        sb.from("tn_duels").select("settled_house").not("settled_house", "is", null)
+          .then(function(res){
+            var s = 0;
+            if (!res.error && res.data) res.data.forEach(function(r){ s = round2(s + (Number(r.settled_house) || 0)); });
+            finish(s);
+          })
+          .catch(function(){ finish(0); });
+      }
+
       /* ---------------- game P&L ---------------- */
       // House profit per earning option: what users staked minus what
       // was paid back out, over SETTLED activity only — pending bids and
@@ -1808,6 +1915,23 @@
         var box = $("gamePlBody");
         if (!box) return;
         var rows = gamePLRows();
+        (function(){
+          var pl = baseAdmin().pl || {};
+          rows.forEach(function(r){
+            if (!r.has) return;
+            var b = pl[r.name] || { staked: 0, paid: 0 };
+            r.staked = adjAmt(r.staked, b.staked);
+            r.paid = adjAmt(r.paid, b.paid);
+            if (r.staked <= 0 && r.paid <= 0) r.has = false;
+            else r.net = round2(r.staked - r.paid);
+          });
+          rows.sort(function(a, b){
+            if (a.has && b.has) return b.net - a.net;
+            if (a.has) return -1;
+            if (b.has) return 1;
+            return 0;
+          });
+        })();
         var rank = 0, tStaked = 0, tPaid = 0, anyData = false;
         var body = rows.map(function(r){
           if (!r.has){
@@ -1841,8 +1965,8 @@
         });
         $("statUsers").textContent = DB.profiles.length;
         $("statPending").textContent = DB.requests.filter(function(r){ return r.status === "pending"; }).length;
-        $("statMain").textContent = fmtUSD(totalMain);
-        $("statMining").textContent = fmtUSD(totalMining);
+        $("statMain").textContent = fmtUSD(adjAmt(totalMain, baseAdmin().totalMain));
+        $("statMining").textContent = fmtUSD(adjAmt(totalMining, baseAdmin().totalMining));
       }
       function resolveReferrer(p){
         if (!p.referred_by) return null;
@@ -2254,6 +2378,9 @@
           processReferralVesting();
         });
         loadSettlementMode();
+        loadStatsBaseline();
+        var rsb = $("resetStatsBtn");
+        if (rsb) rsb.addEventListener("click", resetStatsBaseline);
         startRealtime();
         try { adminPushRefreshState(); } catch(e){ /* phone push is optional */ }
       }
